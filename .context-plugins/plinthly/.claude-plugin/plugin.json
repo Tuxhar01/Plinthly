@@ -1,0 +1,6 @@
+{
+  "name": "plinthly-procurement-agent",
+  "description": "Deterministic purchase assurance, multi-merchant catalog discovery, and PayPal payment authorization context plugin generated from Plinthly OpenAPI specification.",
+  "version": "1.0.0",
+  "defaultEnabled": true
+}

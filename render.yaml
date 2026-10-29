@@ -1,0 +1,56 @@
+# Plinthly Render Deployment Blueprint (IaC)
+# Schema: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: plinthly-app
+    runtime: node
+    plan: starter
+    region: oregon
+    buildCommand: npx prisma generate && npm run build
+    startCommand: npx prisma migrate deploy && npm start
+    healthCheckPath: /api/health
+    autoDeploy: false
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: NEXT_TELEMETRY_DISABLED
+        value: "1"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: plinthly-postgres
+          property: connectionString
+      - key: PAYPAL_ENV
+        value: sandbox
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash-lite
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: CHANNEL3_ENDPOINT
+        value: https://api.trychannel3.com/v1/search
+      - key: CHANNEL3_API_KEY
+        sync: false
+      - key: SHOPIFY_STORE_DOMAIN
+        sync: false
+      - key: SHOPIFY_STOREFRONT_ACCESS_TOKEN
+        sync: false
+      - key: BESTBUY_COMMERCE_API_KEY
+        sync: false
+      - key: BESTBUY_API_BASE_URL
+        value: https://api.bestbuy.com/v1
+      - key: JUDGE_ACCESS_SECRET
+        sync: false
+
+databases:
+  - name: plinthly-postgres
+    plan: starter
+    region: oregon
+    databaseName: plinthly
+    user: plinthly
+    ipAllowList: [] # Only internal Render network access by default

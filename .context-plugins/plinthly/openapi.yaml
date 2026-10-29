@@ -1,0 +1,575 @@
+openapi: 3.1.0
+info:
+  title: Plinthly Autonomous Procurement & Purchase Assurance API
+  version: 1.0.0
+  description: >
+    Production-grade API contract for Plinthly, an AI-powered enterprise procurement agent
+    with deterministic policy governance, multi-vendor discovery, AG Grid candidate comparison,
+    and uncaptured PayPal payment authorization safeguards.
+servers:
+  - url: http://localhost:3000
+    description: Local Development Server
+  - url: https://plinthly-app.onrender.com
+    description: Render Production Staging (Target)
+
+paths:
+  /api/health:
+    get:
+      summary: Health check and connectivity probe
+      description: Returns service health status and database connectivity. Used for container and platform orchestration probes.
+      operationId: checkHealth
+      responses:
+        '200':
+          description: Service and database are healthy.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  database:
+                    type: string
+                    example: connected
+                  timestamp:
+                    type: string
+                    format: date-time
+        '503':
+          description: Service degraded or database unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/ai/decompose:
+    post:
+      summary: Decompose natural-language procurement request
+      description: Uses Gemini 3.5 Flash Lite with structured schema constraints to parse user intent into budget, currency, quantity, technical specifications, and detected ambiguities.
+      operationId: decomposeRequest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - prompt
+              properties:
+                prompt:
+                  type: string
+                  example: "I need a high-performance laptop with 16 GB RAM under $1,200."
+      responses:
+        '200':
+          description: Structured requirement decomposition.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecompositionResult'
+        '400':
+          description: Invalid request payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/discovery/search:
+    post:
+      summary: Multi-merchant catalog discovery
+      description: Searches multi-retailer products via Channel3 API adapter with strict provenance tracking.
+      operationId: searchProducts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - query
+              properties:
+                query:
+                  type: string
+                  example: "laptop 16GB RAM"
+                limit:
+                  type: integer
+                  default: 10
+      responses:
+        '200':
+          description: Discovered candidate items with merchant provenance.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  candidates:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Candidate'
+
+  /api/discovery/shipping-quotes:
+    post:
+      summary: Fetch real-time shipping quote
+      description: Queries Storefront GraphQL (Shopify) or Commerce API (Best Buy) adapters to obtain verified shipping costs.
+      operationId: getShippingQuotes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - provider
+                - destination
+              properties:
+                provider:
+                  type: string
+                  enum: [shopify, bestbuy]
+                variantId:
+                  type: string
+                destination:
+                  $ref: '#/components/schemas/ShippingDestination'
+      responses:
+        '200':
+          description: Shipping quote response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShippingQuoteResult'
+
+  /api/purchases:
+    get:
+      summary: List purchase requests
+      description: Retrieves purchases visible to the authenticated actor.
+      operationId: listPurchases
+      security:
+        - ActorHeaderAuth: []
+        - DemoTokenAuth: []
+      responses:
+        '200':
+          description: List of purchase requests.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PurchaseAggregate'
+    post:
+      summary: Create purchase draft
+      description: Creates a new purchase draft with budget cap and technical requirements.
+      operationId: createPurchase
+      security:
+        - ActorHeaderAuth: []
+        - DemoTokenAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePurchaseParams'
+      responses:
+        '201':
+          description: Purchase created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PurchaseAggregate'
+
+  /api/purchases/{id}:
+    get:
+      summary: Retrieve purchase aggregate
+      description: Fetches purchase, candidates, policy evaluation results, approvals, and payment attempts.
+      operationId: getPurchase
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      security:
+        - ActorHeaderAuth: []
+        - DemoTokenAuth: []
+      responses:
+        '200':
+          description: Full purchase aggregate.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PurchaseAggregate'
+        '404':
+          description: Purchase not found.
+
+  /api/purchases/{id}/evaluate:
+    post:
+      summary: Run deterministic policy evaluation
+      description: Evaluates all registered policies against candidate items and evidence.
+      operationId: evaluatePurchase
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      security:
+        - ActorHeaderAuth: []
+        - DemoTokenAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - candidateId
+                - expectedVersion
+              properties:
+                candidateId:
+                  type: string
+                expectedVersion:
+                  type: integer
+      responses:
+        '200':
+          description: Updated purchase aggregate with evaluation results.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PurchaseAggregate'
+
+  /api/purchases/{id}/approve:
+    post:
+      summary: Record human buyer approval
+      description: Binds human approval to an immutable candidate snapshot, total landed cost, and policy fingerprint.
+      operationId: approvePurchase
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      security:
+        - ActorHeaderAuth: []
+        - DemoTokenAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - candidateId
+                - expectedVersion
+              properties:
+                candidateId:
+                  type: string
+                expectedVersion:
+                  type: integer
+      responses:
+        '200':
+          description: Approved purchase aggregate.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PurchaseAggregate'
+
+  /api/purchases/{id}/orders:
+    post:
+      summary: Create PayPal order
+      description: Creates a PayPal order using the PayPal Orders v2 API with intent=AUTHORIZE.
+      operationId: createPayPalOrder
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      security:
+        - ActorHeaderAuth: []
+        - DemoTokenAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - expectedVersion
+              properties:
+                expectedVersion:
+                  type: integer
+      responses:
+        '200':
+          description: Payment attempt record with PayPal order ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PurchaseAggregate'
+
+  /api/purchases/{id}/paypal/verify:
+    post:
+      summary: Verify PayPal buyer authorization
+      description: Verifies against the PayPal API that the buyer approved the transaction and checks order integrity. Never executes capture.
+      operationId: verifyPayPalPayment
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      security:
+        - ActorHeaderAuth: []
+        - DemoTokenAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - paymentAttemptId
+              properties:
+                paymentAttemptId:
+                  type: string
+      responses:
+        '200':
+          description: Verified payment status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PurchaseAggregate'
+
+  /api/purchases/{id}/audit:
+    get:
+      summary: Get immutable audit log
+      description: Retrieves complete hash-chained audit event history for the purchase.
+      operationId: getAuditLog
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      security:
+        - ActorHeaderAuth: []
+        - DemoTokenAuth: []
+      responses:
+        '200':
+          description: Chronological audit events.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AuditEvent'
+
+components:
+  securitySchemes:
+    ActorHeaderAuth:
+      type: apiKey
+      in: header
+      name: x-actor-id
+      description: Actor identity header (local development / demo mode).
+    DemoTokenAuth:
+      type: http
+      scheme: bearer
+      description: Shared secret bearer token for staging/preview deployments.
+
+  schemas:
+    DecompositionResult:
+      type: object
+      properties:
+        budgetCents:
+          type: integer
+          nullable: true
+        currency:
+          type: string
+          nullable: true
+        quantity:
+          type: integer
+          nullable: true
+        productKeywords:
+          type: string
+        requirements:
+          type: array
+          items:
+            type: object
+            properties:
+              key:
+                type: string
+              expectedValue:
+                type: string
+              description:
+                type: string
+        ambiguities:
+          type: array
+          items:
+            type: string
+        confidenceEstimate:
+          type: object
+          properties:
+            score:
+              type: number
+            label:
+              type: string
+            notes:
+              type: string
+
+    ShippingDestination:
+      type: object
+      required:
+        - countryCode
+        - postalCode
+      properties:
+        countryCode:
+          type: string
+          example: "US"
+        provinceCode:
+          type: string
+          example: "CA"
+        city:
+          type: string
+          example: "San Francisco"
+        postalCode:
+          type: string
+          example: "94103"
+        address1:
+          type: string
+          example: "123 Market St"
+
+    ShippingQuoteResult:
+      type: object
+      properties:
+        provider:
+          type: string
+        status:
+          type: string
+          enum: [available, unavailable, error]
+        quotes:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              title:
+                type: string
+              amountCents:
+                type: integer
+              currency:
+                type: string
+              deliveryEstimate:
+                type: string
+        rawSource:
+          type: string
+        errorMessage:
+          type: string
+          nullable: true
+
+    Candidate:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        merchantName:
+          type: string
+        merchantUrl:
+          type: string
+        unitPriceCents:
+          type: integer
+        quantity:
+          type: integer
+        shippingCents:
+          type: integer
+        totalCents:
+          type: integer
+        currency:
+          type: string
+        availability:
+          type: string
+        snapshotHash:
+          type: string
+
+    CreatePurchaseParams:
+      type: object
+      required:
+        - budgetCents
+        - currency
+        - requirements
+      properties:
+        budgetCents:
+          type: integer
+        currency:
+          type: string
+        requirements:
+          type: object
+
+    PurchaseAggregate:
+      type: object
+      properties:
+        purchase:
+          type: object
+          properties:
+            id:
+              type: string
+            status:
+              type: string
+            version:
+              type: integer
+            budgetCents:
+              type: integer
+            currency:
+              type: string
+            selectedCandidateId:
+              type: string
+              nullable: true
+        candidates:
+          type: array
+          items:
+            $ref: '#/components/schemas/Candidate'
+        paymentAttempts:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              status:
+                type: string
+              paypalOrderId:
+                type: string
+                nullable: true
+              verifiedStatus:
+                type: string
+                nullable: true
+
+    AuditEvent:
+      type: object
+      properties:
+        id:
+          type: string
+        purchaseId:
+          type: string
+        type:
+          type: string
+        actor:
+          type: object
+        payload:
+          type: object
+        createdAt:
+          type: string
+          format: date-time
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                type: object

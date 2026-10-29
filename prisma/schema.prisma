@@ -1,0 +1,202 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum PurchaseStatus {
+  DRAFT
+  REQUIREMENTS_CONFIRMED
+  EVALUATED
+  POLICY_BLOCKED
+  POLICY_PASSED
+  APPROVED
+  ORDER_CREATED
+  BUYER_APPROVED
+  CAPTURE_ATTEMPTED
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum CandidateSource {
+  channel3
+  seeded
+}
+
+enum EvidenceStatus {
+  supports
+  contradicts
+  missing
+}
+
+enum PolicyOutcome {
+  pass
+  block
+  unknown
+}
+
+enum PaymentAttemptStatus {
+  OPEN
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum AuditEventType {
+  proposed
+  requirements_confirmed
+  evaluated
+  policy_blocked
+  policy_passed
+  approved
+  approval_invalidated
+  order_created
+  buyer_approved
+  capture_attempted
+  completed
+  failed
+  cancelled
+}
+
+model Purchase {
+  id                         String            @id @default(uuid())
+  status                     PurchaseStatus
+  requirements               Json
+  budgetCents                Int
+  currency                   String            @db.VarChar(3)
+  policyVersion              String?
+  policyEvidenceFingerprint  String?           @db.Char(64)
+  selectedCandidateId        String?
+  ownerUserId                String            @default("local_dev_user")
+  version                    Int               @default(1)
+  createdAt                  DateTime          @default(now())
+  updatedAt                  DateTime          @updatedAt
+  candidates                 Candidate[]       @relation("PurchaseCandidates")
+  selectedCandidate          Candidate?        @relation("SelectedCandidate", fields: [selectedCandidateId, id], references: [id, purchaseId], onDelete: Restrict)
+  approvals                  Approval[]
+  paymentAttempts            PaymentAttempt[]
+  policyResults              PolicyResult[]
+  auditEvents                AuditEvent[]
+}
+
+model IdempotencyRecord {
+  id             String    @id @default(uuid())
+  key            String
+  actorId        String
+  operation      String
+  requestHash    String    @db.Char(64)
+  responseStatus Int
+  responseBody   Json
+  createdAt      DateTime  @default(now())
+  expiresAt      DateTime?
+
+  @@unique([actorId, operation, key])
+  @@index([createdAt])
+}
+
+
+model Candidate {
+  id              String          @id @default(uuid())
+  purchaseId      String
+  purchase        Purchase        @relation("PurchaseCandidates", fields: [purchaseId], references: [id], onDelete: Restrict)
+  source          CandidateSource
+  externalId      String
+  title           String
+  merchantName    String
+  merchantUrl     String
+  unitPriceCents  Int
+  quantity        Int
+  shippingCents   Int
+  totalCents      Int
+  currency        String          @db.VarChar(3)
+  availability    String
+  capturedAt      DateTime
+  snapshotHash    String          @db.Char(64)
+  evidence        EvidenceItem[]
+  approvals       Approval[]
+  selectedBy      Purchase[]      @relation("SelectedCandidate")
+
+  @@unique([id, purchaseId])
+  @@index([purchaseId])
+}
+
+model EvidenceItem {
+  id             String         @id @default(uuid())
+  candidateId    String
+  candidate      Candidate      @relation(fields: [candidateId], references: [id], onDelete: Restrict)
+  requirementKey String
+  value          String
+  sourceUrl      String
+  sourceType     String
+  capturedAt     DateTime
+  status         EvidenceStatus
+
+  @@index([candidateId])
+}
+
+model PolicyResult {
+  id            String        @id @default(uuid())
+  purchaseId    String
+  purchase      Purchase      @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
+  policyVersion String
+  ruleKey       String
+  outcome       PolicyOutcome
+  detail        String?
+  evaluatedAt   DateTime
+
+  @@index([purchaseId, policyVersion])
+}
+
+model Approval {
+  id                  String           @id @default(uuid())
+  purchaseId          String
+  purchase            Purchase         @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
+  candidateId         String
+  candidate           Candidate        @relation(fields: [candidateId, purchaseId], references: [id, purchaseId], onDelete: Restrict)
+  snapshotHash        String           @db.Char(64)
+  totalCents          Int
+  currency            String           @db.VarChar(3)
+  policyVersion       String
+  evidenceFingerprint String           @db.Char(64)
+  approverUserId      String
+  approvedAt          DateTime
+  invalidatedAt       DateTime?
+  invalidationReason  String?
+  paymentAttempts     PaymentAttempt[]
+
+  @@unique([id, purchaseId])
+  @@index([purchaseId])
+}
+
+model PaymentAttempt {
+  id              String               @id @default(uuid())
+  purchaseId      String
+  purchase        Purchase             @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
+  approvalId      String
+  approval        Approval             @relation(fields: [approvalId, purchaseId], references: [id, purchaseId], onDelete: Restrict)
+  idempotencyKey  String               @unique
+  paypalOrderId   String?              @unique
+  status          PaymentAttemptStatus
+  createdAt       DateTime             @default(now())
+  verifiedStatus  String?
+  verifiedAt      DateTime?
+  failureReason   String?
+
+  @@unique([id, purchaseId])
+  @@index([purchaseId])
+}
+
+model AuditEvent {
+  id         String         @id @default(uuid())
+  purchaseId String
+  purchase   Purchase       @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
+  type       AuditEventType
+  actor      Json
+  payload    Json
+  createdAt  DateTime       @default(now())
+
+  @@index([purchaseId, createdAt])
+}
