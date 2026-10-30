@@ -14,9 +14,44 @@ import {
 import { validateRecord } from "../audit/writer";
 import { normalizePolicyEvidenceFingerprint } from "../state/snapshot";
 import { IdempotencyRecord } from "./types";
+import {
+  computeCanonicalDraftHash,
+  verifyQuantityConfirmation,
+  computeTokenHash,
+} from "./quantity-confirmation";
+import {
+  NotFoundError,
+  ForbiddenError,
+  IllegalTransitionError,
+  ApprovalIntegrityError,
+  ValidationError,
+  DatabaseUnavailableError,
+  IdempotencyConflictError,
+} from "./errors";
+import { ProcurementLineItem } from "../discovery/cart/types";
 
-import { DatabaseUnavailableError } from "./errors";
 export { DatabaseUnavailableError };
+
+export interface ConvertDraftParams {
+  readonly draftId: string;
+  readonly actor: Actor;
+  readonly actorId: string;
+  readonly now: Date;
+  readonly candidateTokens: string[];
+  readonly purchaseId: string;
+  readonly purchaseStatus: PurchaseStatus;
+  readonly ownerUserId: string;
+  readonly auditEvents: AuditEventDraft[];
+  readonly idempotencyRecord?: IdempotencyRecord;
+}
+
+export interface ConvertDraftResult {
+  readonly purchase: PurchaseRecord;
+  readonly lineItems: readonly ProcurementLineItem[];
+  readonly effectiveBudgetCents: number;
+  readonly effectiveCurrency: Currency;
+  readonly consumedTokenJtis: string[];
+}
 
 export interface PurchaseRecord {
   id: string;
@@ -29,6 +64,7 @@ export interface PurchaseRecord {
   selectedCandidateId: string | null;
   ownerUserId: string;
   version: number;
+  originatingDraftId?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -184,8 +220,10 @@ export interface PurchaseRepository {
   createPurchase(
     purchase: PurchaseRecord,
     auditEvents: AuditEventDraft[],
-    idempotencyRecord?: IdempotencyRecord
+    idempotencyRecord?: IdempotencyRecord,
+    consumedTokenJtis?: string[]
   ): Promise<PurchaseRecord>;
+  convertDraftToPurchase(params: ConvertDraftParams): Promise<ConvertDraftResult>;
   getPurchaseById(id: string): Promise<PurchaseAggregate | null>;
   saveCandidateWithEvidence(candidate: CandidateRecord, evidence: EvidenceItemRecord[]): Promise<void>;
   recordEvaluation(params: RecordEvaluationParams): Promise<PurchaseAggregate>;
@@ -283,7 +321,8 @@ export class PrismaPurchaseRepository implements PurchaseRepository {
   async createPurchase(
     purchase: PurchaseRecord,
     auditEvents: AuditEventDraft[],
-    idempotencyRecord?: IdempotencyRecord
+    idempotencyRecord?: IdempotencyRecord,
+    consumedTokenJtis?: string[]
   ): Promise<PurchaseRecord> {
     const client = this.getClient();
 
@@ -323,10 +362,28 @@ export class PrismaPurchaseRepository implements PurchaseRepository {
           selectedCandidateId: purchase.selectedCandidateId,
           ownerUserId: purchase.ownerUserId,
           version: purchase.version,
+          originatingDraftId: purchase.originatingDraftId ?? null,
           createdAt: purchase.createdAt,
           updatedAt: purchase.updatedAt,
         },
       });
+
+      if (purchase.originatingDraftId) {
+        await tx.procurementDraft.update({
+          where: { id: purchase.originatingDraftId },
+          data: { status: "CONVERTED", updatedAt: purchase.updatedAt },
+        });
+      }
+
+      if (consumedTokenJtis && consumedTokenJtis.length > 0) {
+        await tx.quantityConfirmation.updateMany({
+          where: { tokenJti: { in: consumedTokenJtis } },
+          data: {
+            consumedAt: purchase.createdAt,
+            consumedPurchaseId: created.id,
+          },
+        });
+      }
 
       if (auditEvents.length > 0) {
         await tx.auditEvent.createMany({
@@ -353,6 +410,438 @@ export class PrismaPurchaseRepository implements PurchaseRepository {
         version: created.version,
         createdAt: created.createdAt,
         updatedAt: created.updatedAt,
+      };
+    });
+  }
+
+  async convertDraftToPurchase(params: ConvertDraftParams): Promise<ConvertDraftResult> {
+    const {
+      draftId,
+      actor,
+      actorId,
+      candidateTokens,
+      purchaseId,
+      purchaseStatus,
+      ownerUserId,
+      auditEvents,
+      idempotencyRecord,
+    } = params;
+
+    void actor;
+    const client = this.getClient();
+
+    // Pre-validate all audit records before touching the database
+    for (const draft of auditEvents) {
+      validateRecord(draft);
+    }
+
+    return client.$transaction(async (tx) => {
+      // 1. Acquire row lock on ProcurementDraft as first draft operation
+      const rows = await tx.$queryRaw<Array<{
+        id: string;
+        actorId: string;
+        version: number;
+        budgetCents: number | null;
+        currency: string;
+        destination: unknown;
+        lineItems: unknown;
+        requirements: unknown;
+        originalPrompt: string | null;
+        draftHash: string;
+        status: string;
+        createdAt: Date;
+        updatedAt: Date;
+      }>>`
+        SELECT * FROM "ProcurementDraft"
+        WHERE "id" = ${draftId}
+        FOR UPDATE
+      `;
+
+      // Obtain current timestamp strictly AFTER acquiring the row lock on ProcurementDraft.
+      // This ensures any time spent waiting for a concurrent transaction to release the lock
+      // is properly accounted for, preventing acceptance of tokens that expired during the lock wait.
+      const lockAcquiredAt = new Date();
+      const effectiveNow = lockAcquiredAt;
+
+      const draft = rows[0];
+      if (!draft) {
+        throw new NotFoundError(`Procurement draft "${draftId}" not found.`);
+      }
+
+      // 2. Validate actor ownership
+      if (draft.actorId !== actorId) {
+        throw new ForbiddenError(`Actor "${actorId}" is not authorized to convert draft owned by "${draft.actorId}".`);
+      }
+
+      // 3. Validate status
+      if (draft.status === "CONVERTED") {
+        if (idempotencyRecord) {
+          const committedIdem = await tx.idempotencyRecord.findUnique({
+            where: {
+              actorId_operation_key: {
+                actorId,
+                operation: idempotencyRecord.operation,
+                key: idempotencyRecord.key,
+              },
+            },
+          });
+          if (committedIdem) {
+            if (committedIdem.requestHash !== idempotencyRecord.requestHash) {
+              throw new IdempotencyConflictError(
+                `Idempotency key "${idempotencyRecord.key}" was previously used for operation "${idempotencyRecord.operation}" with different request parameters.`
+              );
+            }
+            const body = committedIdem.responseBody as unknown as {
+              id: string;
+              status: string;
+              budgetCents: number;
+              currency: string;
+              requirements: unknown;
+              lineItems?: ProcurementLineItem[];
+              policyVersion: string | null;
+              policyEvidenceFingerprint: string | null;
+              selectedCandidateId: string | null;
+              ownerUserId: string;
+              version: number;
+              originatingDraftId?: string | null;
+              selectedCandidate?: unknown;
+              activeApproval?: unknown;
+              createdAt: string;
+              updatedAt: string;
+            };
+            return {
+              purchase: {
+                id: body.id,
+                status: body.status as PurchaseStatus,
+                requirements: body.requirements,
+                budgetCents: body.budgetCents,
+                currency: body.currency as Currency,
+                policyVersion: body.policyVersion,
+                policyEvidenceFingerprint: body.policyEvidenceFingerprint,
+                selectedCandidateId: body.selectedCandidateId,
+                ownerUserId: body.ownerUserId,
+                version: body.version,
+                originatingDraftId: body.originatingDraftId ?? draft.id,
+                selectedCandidate: body.selectedCandidate as CandidateRecord | null,
+                activeApproval: body.activeApproval as ApprovalRecord | null,
+                createdAt: new Date(body.createdAt),
+                updatedAt: new Date(body.updatedAt),
+              },
+              lineItems: body.lineItems ?? [],
+              effectiveBudgetCents: body.budgetCents,
+              effectiveCurrency: body.currency as Currency,
+              consumedTokenJtis: [],
+            };
+          }
+        }
+        throw new IllegalTransitionError("draft_already_converted", "Draft has already been converted to a purchase.");
+      }
+      if (draft.status !== "ACTIVE" && draft.status !== "CONFIRMED") {
+        throw new IllegalTransitionError("draft_not_active", `Draft cannot be converted in status "${draft.status}".`);
+      }
+
+      // 4. Validate canonical hash and version against locked draft
+      const canonicalHash = computeCanonicalDraftHash({
+        draftId: draft.id,
+        version: draft.version,
+        budgetCents: draft.budgetCents,
+        currency: draft.currency,
+        destination: draft.destination,
+        lineItems: (draft.lineItems as unknown as readonly { id: string; title: string; quantity?: number; budgetCents?: number | null; requirements?: unknown }[]) || [],
+        requirements: draft.requirements,
+      });
+      if (draft.draftHash !== canonicalHash) {
+        throw new ApprovalIntegrityError("draft_integrity_mismatch", "Draft content integrity check failed. Hash mismatch.");
+      }
+
+      const draftLineItems = (draft.lineItems as unknown as ProcurementLineItem[]) || [];
+
+      // 5. Decode and verify all candidate confirmation tokens
+      const seenTokens = new Set<string>();
+      for (const t of candidateTokens) {
+        if (seenTokens.has(t)) {
+          throw new ValidationError("Duplicate confirmation tokens detected in request.", [
+            { code: "duplicate_confirmation_tokens", message: "Duplicate confirmation token provided." }
+          ]);
+        }
+        seenTokens.add(t);
+      }
+
+      const unconfirmedItems = draftLineItems.filter(
+        (li) =>
+          li.quantityConfirmed === false ||
+          li.quantitySource === "inferred" ||
+          li.quantitySource === "unresolved" ||
+          li.quantitySource === "manual_override"
+      );
+
+      if (unconfirmedItems.length > 0 && candidateTokens.length === 0) {
+        throw new ValidationError("Missing required quantity confirmation tokens.", [
+          { code: "unconfirmed_inferred_quantity", message: "Inferred or unverified quantity requires explicit buyer confirmation token." }
+        ]);
+      }
+
+      const decodedTokens = candidateTokens.map((t) => {
+        const claims = verifyQuantityConfirmation(t);
+        if (!claims) {
+          throw new ValidationError("Invalid or forged confirmation token.", [
+            { code: "invalid_confirmation_token", message: "Token signature verification failed." }
+          ]);
+        }
+        return { token: t, claims };
+      });
+
+      // Check for duplicate line item confirmations
+      const confirmedLineItemIds = new Set<string>();
+      for (const { claims } of decodedTokens) {
+        if (confirmedLineItemIds.has(claims.lineItemId)) {
+          throw new ValidationError(`Duplicate confirmation token for line item "${claims.lineItemId}".`, [
+            { code: "duplicate_line_item_confirmation", message: `Line item "${claims.lineItemId}" confirmed multiple times.` }
+          ]);
+        }
+        confirmedLineItemIds.add(claims.lineItemId);
+      }
+
+      // Check for unexpected extra tokens
+      for (const { claims } of decodedTokens) {
+        const matching = draftLineItems.find((li) => li.id === claims.lineItemId);
+        if (!matching) {
+          throw new ValidationError(`Unexpected extra confirmation token for line item "${claims.lineItemId}".`, [
+            { code: "unexpected_confirmation_token", message: `Line item "${claims.lineItemId}" does not exist in draft.` }
+          ]);
+        }
+      }
+
+      // Check all unconfirmed items are covered
+      for (const u of unconfirmedItems) {
+        if (!confirmedLineItemIds.has(u.id)) {
+          throw new ValidationError(`Line item "${u.id}" (${u.title}) requires buyer confirmation token.`, [
+            { code: "unconfirmed_inferred_quantity", message: `Line item "${u.id}" has an unconfirmed quantity.` }
+          ]);
+        }
+      }
+
+      // Sort tokens deterministically by JTI
+      decodedTokens.sort((a, b) => a.claims.jti.localeCompare(b.claims.jti));
+      const tokenJtis = decodedTokens.map((t) => t.claims.jti);
+
+      if (tokenJtis.length > 0) {
+        const dbRecords = await tx.quantityConfirmation.findMany({
+          where: { tokenJti: { in: tokenJtis } },
+          orderBy: { tokenJti: "asc" },
+        });
+
+        if (dbRecords.length !== decodedTokens.length) {
+          throw new ValidationError("One or more confirmation records not found in database.", [
+            { code: "invalid_confirmation_token", message: "Durable confirmation record missing." }
+          ]);
+        }
+
+        const dbMap = new Map(dbRecords.map((r) => [r.tokenJti, r]));
+
+        for (const { token, claims } of decodedTokens) {
+          const record = dbMap.get(claims.jti)!;
+
+          if (computeTokenHash(token) !== record.tokenHash) {
+            throw new ValidationError("Token hash does not match stored record hash.", [
+              { code: "invalid_confirmation_token", message: "Token tampering detected." }
+            ]);
+          }
+          if (claims.lineItemId !== record.lineItemId) {
+            throw new ValidationError("Token line item does not match record.", [
+              { code: "invalid_confirmation_token", message: "Line item mismatch." }
+            ]);
+          }
+          if (claims.confirmedQuantity !== record.confirmedQuantity) {
+            throw new ValidationError("Token confirmed quantity does not match record.", [
+              { code: "confirmation_quantity_mismatch", message: "Quantity mismatch." }
+            ]);
+          }
+          if (claims.draftId !== record.draftId || claims.draftVersion !== record.draftVersion || claims.draftHash !== record.draftHash) {
+            throw new ValidationError("Token draft binding does not match record.", [
+              { code: "confirmation_draft_mismatch", message: "Draft version/hash mismatch." }
+            ]);
+          }
+          if (claims.draftHash !== draft.draftHash) {
+            throw new ValidationError("Confirmation draft mismatch: Draft content has changed since confirmation.", [
+              { code: "confirmation_draft_mismatch", message: "Draft content has changed since confirmation." }
+            ]);
+          }
+          if (claims.actorId !== record.actorId || claims.actorId !== actorId) {
+            throw new ValidationError("Confirmation actor mismatch.", [
+              { code: "confirmation_actor_mismatch", message: "Actor mismatch." }
+            ]);
+          }
+          if (record.consumedAt !== null) {
+            throw new ValidationError("Confirmation token has already been consumed.", [
+              { code: "token_already_consumed", message: "Token already consumed." }
+            ]);
+          }
+          if (record.expiresAt < effectiveNow) {
+            throw new ValidationError("Confirmation token has expired.", [
+              { code: "token_expired", message: "Token expired." }
+            ]);
+          }
+          const item = draftLineItems.find((li) => li.id === record.lineItemId);
+          if (!item || item.quantity !== record.confirmedQuantity) {
+            throw new ValidationError("Confirmed quantity does not match line item quantity.", [
+              { code: "confirmation_quantity_mismatch", message: "Quantity mismatch with draft line item." }
+            ]);
+          }
+        }
+      }
+
+      const finalLineItems = draftLineItems.map((li) => ({
+        ...li,
+        quantityConfirmed: true,
+        confirmedAt: effectiveNow.toISOString(),
+        confirmedBy: actorId,
+      }));
+
+      const finalRequirements = {
+        lineItems: finalLineItems,
+        ...(draft.destination ? { destination: draft.destination } : {}),
+      };
+
+      const effectiveBudgetCents = draft.budgetCents ?? 0;
+      const effectiveCurrency = (draft.currency ?? "USD") as Currency;
+
+      // 6. Write idempotency record if present (locking on unique constraint)
+      const responseBody = {
+        id: purchaseId,
+        status: purchaseStatus,
+        budgetCents: effectiveBudgetCents,
+        currency: effectiveCurrency,
+        requirements: finalLineItems,
+        lineItems: finalLineItems,
+        policyVersion: null,
+        policyEvidenceFingerprint: null,
+        selectedCandidateId: null,
+        ownerUserId,
+        version: 1,
+        originatingDraftId: draft.id,
+        selectedCandidate: null,
+        activeApproval: null,
+        createdAt: effectiveNow.toISOString(),
+        updatedAt: effectiveNow.toISOString(),
+      };
+
+      if (idempotencyRecord) {
+        await tx.idempotencyRecord.create({
+          data: {
+            id: idempotencyRecord.id,
+            key: idempotencyRecord.key,
+            actorId: idempotencyRecord.actorId,
+            operation: idempotencyRecord.operation,
+            requestHash: idempotencyRecord.requestHash,
+            responseStatus: 201,
+            responseBody: responseBody as Prisma.InputJsonValue,
+            createdAt: idempotencyRecord.createdAt,
+            expiresAt: idempotencyRecord.expiresAt,
+          },
+        });
+      }
+
+      // 7. Create Purchase record
+      const created = await tx.purchase.create({
+        data: {
+          id: purchaseId,
+          status: purchaseStatus,
+          requirements: finalRequirements as Prisma.InputJsonValue,
+          budgetCents: effectiveBudgetCents,
+          currency: effectiveCurrency,
+          policyVersion: null,
+          policyEvidenceFingerprint: null,
+          selectedCandidateId: null,
+          ownerUserId,
+          version: 1,
+          originatingDraftId: draft.id,
+          createdAt: effectiveNow,
+          updatedAt: effectiveNow,
+        },
+      });
+
+      // 8. Atomically and conditionally consume confirmation records (Requirement 2)
+      if (tokenJtis.length > 0) {
+        const updateResult = await tx.quantityConfirmation.updateMany({
+          where: {
+            tokenJti: { in: tokenJtis },
+            consumedAt: null,
+            draftId: draft.id,
+            actorId: actorId,
+          },
+          data: {
+            consumedAt: effectiveNow,
+            consumedPurchaseId: created.id,
+          },
+        });
+
+        if (updateResult.count !== tokenJtis.length) {
+          throw new ValidationError("Token consumption failed: One or more tokens were already consumed or invalid.", [
+            { code: "token_already_consumed", message: "Concurrent token consumption detected. Rolling back." }
+          ]);
+        }
+      }
+
+      // 9. Change draft status to CONVERTED
+      await tx.procurementDraft.update({
+        where: { id: draft.id },
+        data: {
+          status: "CONVERTED",
+          updatedAt: effectiveNow,
+        },
+      });
+
+      // 10. Write audit events
+      const updatedAuditEvents = auditEvents.map((ae) => {
+        if (ae.type === "proposed") {
+          return {
+            ...ae,
+            payload: {
+              budgetCents: effectiveBudgetCents,
+              currency: effectiveCurrency,
+              ...(draft.destination ? { destination: draft.destination } : {}),
+              lineItems: finalLineItems,
+            },
+          };
+        }
+        return ae;
+      });
+
+      if (updatedAuditEvents.length > 0) {
+        await tx.auditEvent.createMany({
+          data: updatedAuditEvents.map((draftEvent) => ({
+            purchaseId: draftEvent.purchaseId,
+            type: draftEvent.type,
+            actor: draftEvent.actor as unknown as Prisma.InputJsonValue,
+            payload: draftEvent.payload as Prisma.InputJsonValue,
+            createdAt: draftEvent.occurredAt,
+          })),
+        });
+      }
+
+      const purchaseRecord: PurchaseRecord = {
+        id: created.id,
+        status: created.status as PurchaseStatus,
+        requirements: created.requirements,
+        budgetCents: created.budgetCents,
+        currency: created.currency as Currency,
+        policyVersion: created.policyVersion,
+        policyEvidenceFingerprint: normalizePolicyEvidenceFingerprint(created.policyEvidenceFingerprint),
+        selectedCandidateId: created.selectedCandidateId,
+        ownerUserId: created.ownerUserId,
+        version: created.version,
+        originatingDraftId: created.originatingDraftId,
+        createdAt: created.createdAt,
+        updatedAt: created.updatedAt,
+      };
+
+      return {
+        purchase: purchaseRecord,
+        lineItems: finalLineItems,
+        effectiveBudgetCents,
+        effectiveCurrency,
+        consumedTokenJtis: tokenJtis,
       };
     });
   }
@@ -959,8 +1448,10 @@ export class InMemoryPurchaseRepository implements PurchaseRepository {
   async createPurchase(
     purchase: PurchaseRecord,
     auditEvents: AuditEventDraft[],
-    idempotencyRecord?: IdempotencyRecord
+    idempotencyRecord?: IdempotencyRecord,
+    consumedTokenJtis?: string[]
   ): Promise<PurchaseRecord> {
+    void consumedTokenJtis;
     // Pre-validate all audit records before modifying state
     for (const draft of auditEvents) {
       validateRecord(draft);
@@ -1003,6 +1494,15 @@ export class InMemoryPurchaseRepository implements PurchaseRepository {
     this.auditEvents.set(purchase.id, eventsList);
 
     return { ...savedPurchase };
+  }
+
+  async convertDraftToPurchase(params: ConvertDraftParams): Promise<ConvertDraftResult> {
+    const databaseUrl = process.env.DATABASE_URL?.trim();
+    if (databaseUrl && databaseUrl.length > 0) {
+      const prismaRepo = new PrismaPurchaseRepository();
+      return prismaRepo.convertDraftToPurchase(params);
+    }
+    throw new Error("convertDraftToPurchase requires PostgreSQL database connection.");
   }
 
   async getPurchaseById(id: string): Promise<PurchaseAggregate | null> {
@@ -1398,6 +1898,17 @@ export function resetPurchaseRepository(): void {
   if (process.env.NODE_ENV !== "production") {
     globalForPrisma.purchaseRepository = repo;
   }
+}
+
+export function getPrismaClient(): PrismaClient {
+  const repo = getPurchaseRepository();
+  if (repo instanceof PrismaPurchaseRepository) {
+    return (repo as unknown as { getClient: () => PrismaClient }).getClient();
+  }
+  const databaseUrl = process.env.DATABASE_URL?.trim();
+  if (!databaseUrl) throw new DatabaseUnavailableError();
+  const adapter = new PrismaPg({ connectionString: databaseUrl });
+  return new PrismaClient({ adapter });
 }
 
 export async function pingDatabase(): Promise<boolean> {

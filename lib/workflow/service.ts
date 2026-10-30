@@ -78,7 +78,12 @@ import {
   PurchaseAggregate,
   PurchaseRecord,
   PurchaseRepository,
+  getPrismaClient,
 } from "./repository";
+import {
+  computeDraftHash,
+  verifyQuantityConfirmation,
+} from "./quantity-confirmation";
 import { assertPurchaseAccess } from "./auth";
 import { executeWithIdempotency, validateIdempotencyKey } from "./idempotency";
 
@@ -89,6 +94,7 @@ import {
   IllegalTransitionError,
   ApprovalIntegrityError,
   ConcurrencyConflictError,
+  ForbiddenError,
 } from "./errors";
 
 export {
@@ -98,6 +104,7 @@ export {
   IllegalTransitionError,
   ApprovalIntegrityError,
   ConcurrencyConflictError,
+  ForbiddenError,
 };
 
 function generateId(prefix: string): string {
@@ -207,6 +214,7 @@ function buildPurchaseResponse(aggregate: PurchaseAggregate): PurchaseResponse {
     selectedCandidateId: purchase.selectedCandidateId,
     ownerUserId: purchase.ownerUserId,
     version: purchase.version,
+    originatingDraftId: purchase.originatingDraftId ?? null,
     selectedCandidate: selectedCandidate
       ? {
           id: selectedCandidate.id,
@@ -296,6 +304,11 @@ export function aggregateToState(aggregate: PurchaseAggregate): PurchaseState {
   };
 }
 
+export interface CreatePurchaseOptions {
+  readonly now?: Date;
+  readonly workflowContext?: "legacy_direct" | "ai_decomposed" | "manual_multi_item";
+}
+
 export class PurchaseWorkflowService {
   private inFlightOrderCreations = new Map<string, Promise<CreatePayPalOrderResponse>>();
 
@@ -312,8 +325,13 @@ export class PurchaseWorkflowService {
   async createPurchase(
     req: CreatePurchaseRequest,
     actor: Actor,
-    now: Date = new Date()
+    contextOrNow?: Date | CreatePurchaseOptions
   ): Promise<PurchaseResponse> {
+    const options: CreatePurchaseOptions =
+      contextOrNow instanceof Date
+        ? { now: contextOrNow }
+        : (contextOrNow ?? {});
+    const now = options.now ?? new Date();
     const actorId = actor.kind === "user" ? actor.userId : actor.component;
     const validatedKey = req.idempotencyKey ? validateIdempotencyKey(req.idempotencyKey) : null;
 
@@ -329,7 +347,7 @@ export class PurchaseWorkflowService {
         const draftState: PurchaseState = {
           purchaseId,
           status: "DRAFT",
-          budgetCents: req.budgetCents,
+          budgetCents: req.budgetCents ?? 0,
           currency: "USD",
           policyVersion: null,
           requiredRuleKeys: [],
@@ -347,7 +365,7 @@ export class PurchaseWorkflowService {
             actor,
             occurredAt: now,
             payload: {
-              budgetCents: req.budgetCents,
+              budgetCents: req.budgetCents ?? 0,
               currency: "USD",
               ...(req.destination ? { destination: req.destination } : {}),
             },
@@ -369,9 +387,90 @@ export class PurchaseWorkflowService {
 
         let finalRequirements: unknown = req.requirements;
         let lineItems: readonly ProcurementLineItem[] | undefined;
+        const originatingDraftId: string | null = null;
+        let consumedTokenJtisToPass: string[] | undefined;
+        const effectiveBudgetCents = req.budgetCents ?? 0;
+        const effectiveCurrency = (req.currency ?? "USD") as Currency;
 
-        if (req.lineItems && req.lineItems.length > 0) {
-          const valResult = validateProcurementLineItems(req.lineItems, req.currency);
+        const isLegacyCompatibility = options.workflowContext === "legacy_direct";
+        const draftHash = computeDraftHash(req);
+
+        let singleQuantityConfirmed = true;
+        let singleConfirmedAt: string | null = null;
+        let singleConfirmedBy: string | null = null;
+
+        if (req.draftId) {
+          // Collect candidate confirmation tokens from request
+          const rawTokens: string[] = [];
+          if (Array.isArray(req.confirmationTokens)) {
+            rawTokens.push(...req.confirmationTokens);
+          }
+          if (Array.isArray(req.lineItems)) {
+            for (const li of req.lineItems) {
+              if (li.confirmationToken) rawTokens.push(li.confirmationToken);
+            }
+          }
+          if (req.confirmationToken) {
+            rawTokens.push(req.confirmationToken);
+          }
+
+          let idempotencyToPass = undefined;
+          if (idempotencyDraft) {
+            idempotencyToPass = {
+              ...idempotencyDraft,
+              responseStatus: 201,
+              responseBody: null,
+            };
+          }
+
+          const convertResult = await this.repo.convertDraftToPurchase({
+            draftId: req.draftId,
+            actor,
+            actorId,
+            now,
+            candidateTokens: rawTokens,
+            purchaseId,
+            purchaseStatus: finalStatus,
+            ownerUserId,
+            auditEvents,
+            idempotencyRecord: idempotencyToPass,
+          });
+
+          const plannedResponse: PurchaseResponse = {
+            id: convertResult.purchase.id,
+            status: convertResult.purchase.status,
+            budgetCents: convertResult.effectiveBudgetCents,
+            currency: convertResult.effectiveCurrency,
+            requirements: Array.isArray(req.requirements)
+              ? req.requirements
+              : ((convertResult.lineItems as unknown as readonly unknown[]) ?? []),
+            lineItems: convertResult.lineItems,
+            policyVersion: convertResult.purchase.policyVersion,
+            policyEvidenceFingerprint: convertResult.purchase.policyEvidenceFingerprint,
+            selectedCandidateId: convertResult.purchase.selectedCandidateId,
+            ownerUserId: convertResult.purchase.ownerUserId,
+            version: convertResult.purchase.version,
+            originatingDraftId: convertResult.purchase.originatingDraftId ?? null,
+            selectedCandidate: null,
+            activeApproval: null,
+            createdAt: convertResult.purchase.createdAt.toISOString(),
+            updatedAt: convertResult.purchase.updatedAt.toISOString(),
+          };
+
+          return {
+            status: 201,
+            body: plannedResponse,
+            persistedAtomically: !!idempotencyToPass,
+          };
+        } else if (req.lineItems && req.lineItems.length > 0) {
+          const valResult = validateProcurementLineItems(req.lineItems, req.currency, {
+            isLegacyCompatibilityPath: isLegacyCompatibility,
+            workflowContext: isLegacyCompatibility ? "legacy_direct" : options.workflowContext,
+            confirmedAt: now.toISOString(),
+            confirmedBy: actorId,
+            draftHash,
+            actorId,
+          });
           if (!valResult.ok) {
             throw new ValidationError("Invalid multi-item procurement line items", valResult.errors);
           }
@@ -381,10 +480,80 @@ export class PurchaseWorkflowService {
             ...(req.destination ? { destination: req.destination } : {}),
           };
         } else if (req.requirements) {
+          if (req.quantitySource === "legacy_direct" && !isLegacyCompatibility) {
+            throw new ValidationError("Unauthorized legacy direct provenance", [
+              {
+                code: "unauthorized_legacy_provenance",
+                message: 'Line item cannot specify internal provenance "legacy_direct".',
+              },
+            ]);
+          }
+
+          if (!isLegacyCompatibility && (req.quantitySource === "inferred" || req.quantitySource === "unresolved" || req.quantitySource === "manual_override")) {
+            if (!req.confirmationToken) {
+              throw new ValidationError("Inferred quantity requires buyer confirmation token", [
+                {
+                  code: "unconfirmed_inferred_quantity",
+                  message: "Inferred quantity requires an authenticated confirmation token before purchase submission.",
+                },
+              ]);
+            }
+            const receipt = verifyQuantityConfirmation(req.confirmationToken);
+            if (!receipt) {
+              throw new ValidationError("Invalid confirmation token", [
+                { code: "invalid_confirmation_token", message: "Confirmation token is invalid or forged." },
+              ]);
+            }
+            if (receipt.confirmedQuantity !== (req.requestedQuantity ?? 1)) {
+              throw new ValidationError("Confirmation quantity mismatch", [
+                {
+                  code: "confirmation_quantity_mismatch",
+                  message: `Confirmation token quantity (${receipt.confirmedQuantity}) does not match requested quantity (${req.requestedQuantity ?? 1}).`,
+                },
+              ]);
+            }
+            if (receipt.actorId !== actorId) {
+              throw new ValidationError("Confirmation actor mismatch", [
+                { code: "confirmation_actor_mismatch", message: "Confirmation token actor does not match authenticated actor." },
+              ]);
+            }
+            if (receipt.draftHash !== draftHash) {
+              throw new ValidationError("Confirmation draft mismatch", [
+                { code: "confirmation_draft_mismatch", message: "Draft content has changed since confirmation." },
+              ]);
+            }
+            // Check durable token consumption if recorded in database
+            if (receipt.jti) {
+              const prisma = getPrismaClient();
+              const dbRecord = await prisma.quantityConfirmation.findUnique({
+                where: { tokenJti: receipt.jti },
+              });
+              if (dbRecord) {
+                if (dbRecord.consumedAt !== null) {
+                  throw new ValidationError("Confirmation token has already been consumed.", [
+                    { code: "token_already_consumed", message: "Token already consumed." }
+                  ]);
+                }
+                if (dbRecord.expiresAt < now) {
+                  throw new ValidationError("Confirmation token has expired.", [
+                    { code: "token_expired", message: "Token expired." }
+                  ]);
+                }
+                await prisma.quantityConfirmation.update({
+                  where: { tokenJti: receipt.jti },
+                  data: { consumedAt: now, consumedPurchaseId: purchaseId },
+                });
+              }
+            }
+            singleQuantityConfirmed = true;
+            singleConfirmedAt = receipt.confirmedAt ?? now.toISOString();
+            singleConfirmedBy = receipt.actorId;
+          }
+
           lineItems = convertLegacyRequirementsToLineItems(
             req.requirements,
-            req.budgetCents,
-            req.currency,
+            effectiveBudgetCents,
+            effectiveCurrency,
             req.requestedQuantity ?? 1
           );
         }
@@ -393,13 +562,14 @@ export class PurchaseWorkflowService {
           id: purchaseId,
           status: finalStatus,
           requirements: finalRequirements,
-          budgetCents: req.budgetCents,
-          currency: "USD",
+          budgetCents: effectiveBudgetCents,
+          currency: effectiveCurrency,
           policyVersion: null,
           policyEvidenceFingerprint: null,
           selectedCandidateId: null,
           ownerUserId,
           version: 1,
+          originatingDraftId,
           createdAt: now,
           updatedAt: now,
         };
@@ -416,6 +586,7 @@ export class PurchaseWorkflowService {
           selectedCandidateId: purchaseRecord.selectedCandidateId,
           ownerUserId: purchaseRecord.ownerUserId,
           version: purchaseRecord.version,
+          originatingDraftId: purchaseRecord.originatingDraftId ?? null,
           selectedCandidate: null,
           activeApproval: null,
           createdAt: purchaseRecord.createdAt.toISOString(),
@@ -431,7 +602,36 @@ export class PurchaseWorkflowService {
           };
         }
 
-        await this.repo.createPurchase(purchaseRecord, auditEvents, recordToPersist);
+        // Record comprehensive quantity provenance & confirmation audit trail
+        if (auditEvents.length > 0 && auditEvents[0].type === "proposed") {
+          const proposedPayload = (auditEvents[0].payload || {}) as Record<string, unknown>;
+          if (lineItems && lineItems.length > 0) {
+            proposedPayload.lineItems = lineItems.map((li) => ({
+              id: li.id,
+              title: li.title,
+              quantity: li.quantity,
+              quantitySource: li.quantitySource ?? (isLegacyCompatibility ? "legacy_direct" : "explicit"),
+              quantityConfirmed: li.quantityConfirmed ?? true,
+              originalInferredQuantity: li.originalInferredQuantity ?? null,
+              confirmedAt: li.quantityConfirmed ? (li.confirmedAt ?? now.toISOString()) : null,
+              confirmedBy: li.quantityConfirmed ? (li.confirmedBy ?? actorId) : null,
+            }));
+          } else {
+            const isConfirmed =
+              isLegacyCompatibility || req.quantitySource === "explicit"
+                ? true
+                : (singleQuantityConfirmed ?? true);
+            proposedPayload.quantity = req.requestedQuantity ?? 1;
+            proposedPayload.quantitySource = req.quantitySource ?? (isLegacyCompatibility ? "legacy_direct" : "explicit");
+            proposedPayload.quantityConfirmed = isConfirmed;
+            proposedPayload.originalInferredQuantity = req.originalInferredQuantity ?? null;
+            proposedPayload.confirmedAt = isConfirmed ? (singleConfirmedAt ?? now.toISOString()) : null;
+            proposedPayload.confirmedBy = isConfirmed ? (singleConfirmedBy ?? actorId) : null;
+          }
+          auditEvents[0].payload = proposedPayload as unknown as import("../state/types").AuditPayloadProposed;
+        }
+
+        await this.repo.createPurchase(purchaseRecord, auditEvents, recordToPersist, consumedTokenJtisToPass);
 
         return {
           status: 201,

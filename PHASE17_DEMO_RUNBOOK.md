@@ -30,14 +30,14 @@ This runbook provides an exact, step-by-step procedure to evaluate Plinthly’s 
 ### Prerequisites
 - Node.js `22.17.0` and npm `10.9.2`
 - PostgreSQL 15+ database running (configured in `.env.local` as `DATABASE_URL`)
-- Active local server running on `http://localhost:3000`
+- Active local server running on `http://127.0.0.1:3001`
 
 ### Starting the Server
 ```bash
 # In the repository root:
-npm run dev
+npx next dev . -H 127.0.0.1 -p 3001
 ```
-Confirm the application is available at [http://localhost:3000](http://localhost:3000).
+Confirm the application is available at [http://127.0.0.1:3001](http://127.0.0.1:3001).
 
 ### Pre-Run Invariant Check
 Plinthly includes strict invariants protecting production-critical audit logs and sandbox boundaries. Verify system health before running the demo:
@@ -70,7 +70,7 @@ To demonstrate all edge cases cleanly without brittle external networks, the dem
 ## 4. Step-by-Step Interactive Demo Walkthrough
 
 ### Step 1: Natural Language Request & Gemini AI Decomposition
-1. Navigate to [http://localhost:3000](http://localhost:3000) in your web browser.
+1. Navigate to [http://127.0.0.1:3001](http://127.0.0.1:3001) in your web browser.
 2. In the **Natural Language Request Studio** (Stage 1), enter the buyer's procurement prompt:
    ```text
    I need a workstation laptop with 32GB RAM under $1,500, a 4K monitor under $400, and a USB-C dock under $150 delivered to 98101.

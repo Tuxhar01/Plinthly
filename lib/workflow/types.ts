@@ -26,10 +26,16 @@ export interface BuyerRequirementItem {
  * Request body for creating a new purchase request.
  */
 export interface CreatePurchaseRequest {
-  readonly budgetCents: number;
-  readonly currency: Currency;
+  readonly draftId?: string;
+  readonly confirmationTokens?: readonly string[];
+  readonly budgetCents?: number;
+  readonly currency?: Currency;
   readonly requirements?: readonly (string | BuyerRequirementItem)[];
   readonly requestedQuantity?: number;
+  readonly quantitySource?: import("../discovery/cart").QuantityProvenanceSource;
+  readonly quantityConfirmed?: boolean;
+  readonly originalInferredQuantity?: number | null;
+  readonly confirmationToken?: string;
   readonly lineItems?: readonly import("../discovery/cart").ProcurementLineItem[];
   readonly destination?: import("../discovery/shipping").DestinationContext;
   readonly confirmImmediately?: boolean;
@@ -76,6 +82,7 @@ export interface PurchaseResponse {
   readonly selectedCandidateId: string | null;
   readonly ownerUserId: string;
   readonly version: number;
+  readonly originatingDraftId?: string | null;
   readonly lineItems?: readonly import("../discovery/cart").ProcurementLineItem[];
   readonly destination?: import("../discovery/shipping").DestinationContext;
   readonly multiItemSnapshot?: import("../discovery/cart").MultiItemApprovalSnapshot | null;

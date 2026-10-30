@@ -1,6 +1,6 @@
 import { Actor } from "../state/types";
 import { WorkflowError, UnauthorizedError, ForbiddenError } from "./errors";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
 export { UnauthorizedError, ForbiddenError };
 
@@ -17,11 +17,76 @@ export interface ActorResolver {
   resolveActor(request: Request): Promise<ResolvedActorResult>;
 }
 
+export interface JudgeSessionClaims {
+  readonly sub: string;
+  readonly sessionId: string;
+  readonly role: "judge_evaluator";
+  readonly iat: number;
+  readonly exp: number;
+}
+
+export function getJudgeSessionSecret(): string {
+  const secret =
+    process.env.JUDGE_SESSION_SECRET?.trim() ||
+    process.env.CONFIRMATION_SIGNING_SECRET?.trim();
+  if (!secret || secret.length < 32) {
+    throw new Error(
+      "JUDGE_SESSION_SECRET or CONFIRMATION_SIGNING_SECRET must be at least 32 characters."
+    );
+  }
+  return secret;
+}
+
+export function createJudgeSessionToken(sessionId: string, ttlSeconds = 86400): string {
+  const secret = getJudgeSessionSecret();
+  const now = Math.floor(Date.now() / 1000);
+  const claims: JudgeSessionClaims = {
+    sub: `judge_${sessionId}`,
+    sessionId,
+    role: "judge_evaluator",
+    iat: now,
+    exp: now + ttlSeconds,
+  };
+  const payloadB64 = Buffer.from(JSON.stringify(claims), "utf8").toString("base64url");
+  const signature = createHmac("sha256", secret).update(payloadB64).digest("base64url");
+  return `${payloadB64}.${signature}`;
+}
+
+export function verifyJudgeSessionToken(token: string): JudgeSessionClaims | null {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 2) return null;
+    const [payloadB64, signature] = parts;
+    if (!payloadB64 || !signature) return null;
+
+    const secret = getJudgeSessionSecret();
+    const expectedSig = createHmac("sha256", secret).update(payloadB64).digest("base64url");
+    const sigBuf = Buffer.from(signature, "base64url");
+    const expBuf = Buffer.from(expectedSig, "base64url");
+    if (sigBuf.length !== expBuf.length || !timingSafeEqual(sigBuf, expBuf)) {
+      return null;
+    }
+
+    const claims = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8")) as JudgeSessionClaims;
+    if (!claims.sub || !claims.sessionId || !claims.exp) return null;
+    if (Math.floor(Date.now() / 1000) >= claims.exp) return null;
+    return claims;
+  } catch {
+    return null;
+  }
+}
+
 function verifySecretTimingSafe(supplied: string, expected: string): boolean {
   if (!supplied || !expected) return false;
   const suppliedHash = createHash("sha256").update(supplied).digest();
   const expectedHash = createHash("sha256").update(expected).digest();
   return timingSafeEqual(suppliedHash, expectedHash);
+}
+
+function extractCookie(cookieHeader: string | null, name: string): string | null {
+  if (!cookieHeader) return null;
+  const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
+  return match ? decodeURIComponent(match[1]) : null;
 }
 
 /**
@@ -52,9 +117,7 @@ export function getAuthMode(): AuthMode {
  * Strictly labeled for local demonstration only.
  *
  * In production mode (default):
- * Rejects untrusted client headers. If JUDGE_ACCESS_SECRET is configured,
- * verifies bearer/header credentials against the secret using timing-safe hashing
- * to assign an isolated judge tenant workspace (judge_<sessionId>).
+ * Rejects untrusted client headers. Checks signed judge session token in cookie or header.
  * Requests without valid credentials strictly fail closed.
  */
 export class ServerActorResolver implements ActorResolver {
@@ -65,9 +128,28 @@ export class ServerActorResolver implements ActorResolver {
 
     // Production mode authentication
     if (this.authMode !== "local_demo") {
-      const configuredSecret = process.env.JUDGE_ACCESS_SECRET?.trim();
+      // 1. Check for cryptographically signed judge session token in cookie or header
+      const cookieHeader = headers.get("cookie");
+      const sessionFromCookie = extractCookie(cookieHeader, "plinthly_judge_session");
+      const sessionFromHeader = headers.get("x-judge-session-token")?.trim();
 
-      // Extract credentials from Authorization Bearer or x-judge-access-token
+      const candidateSessionToken = sessionFromCookie || sessionFromHeader;
+      if (candidateSessionToken) {
+        const claims = verifyJudgeSessionToken(candidateSessionToken);
+        if (claims) {
+          return {
+            ok: true,
+            authMode: "production",
+            actor: {
+              kind: "user",
+              userId: claims.sub,
+            },
+          };
+        }
+      }
+
+      // 2. Check for root judge credential in Authorization Bearer or x-judge-access-token
+      const configuredSecret = process.env.JUDGE_ACCESS_SECRET?.trim();
       const authHeader = headers.get("authorization")?.trim();
       let suppliedSecret: string | undefined;
       if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) {
@@ -76,17 +158,31 @@ export class ServerActorResolver implements ActorResolver {
         suppliedSecret = headers.get("x-judge-access-token")?.trim();
       }
 
-      if (configuredSecret && suppliedSecret && verifySecretTimingSafe(suppliedSecret, configuredSecret)) {
-        // Deterministically partition evaluator workspace by session ID if provided
-        const rawSession = headers.get("x-judge-session-id")?.trim() || "evaluator";
-        const sanitizedSession = rawSession.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64) || "evaluator";
+      // If bearer token is itself a signed session token, verify it
+      if (suppliedSecret) {
+        const sessionClaims = verifyJudgeSessionToken(suppliedSecret);
+        if (sessionClaims) {
+          return {
+            ok: true,
+            authMode: "production",
+            actor: {
+              kind: "user",
+              userId: sessionClaims.sub,
+            },
+          };
+        }
+      }
 
+      // Direct judge access secret presented (e.g. CLI or integration test runner)
+      if (configuredSecret && suppliedSecret && verifySecretTimingSafe(suppliedSecret, configuredSecret)) {
+        const rawSession = headers.get("x-judge-session-id")?.trim();
+        const sessionSuffix = rawSession ? rawSession.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64) : "evaluator";
         return {
           ok: true,
           authMode: "production",
           actor: {
             kind: "user",
-            userId: `judge_${sanitizedSession}`,
+            userId: `judge_${sessionSuffix}`,
           },
         };
       }
@@ -98,6 +194,26 @@ export class ServerActorResolver implements ActorResolver {
           "Authentication required. Untrusted actor headers are rejected in deployment mode. Please provide valid judge or evaluator credentials."
         ),
       };
+    }
+
+    // In local_demo mode:
+    // If a valid judge session token is provided, respect it
+    const cookieHeader = headers.get("cookie");
+    const sessionFromCookie = extractCookie(cookieHeader, "plinthly_judge_session");
+    const sessionFromHeader = headers.get("x-judge-session-token")?.trim();
+    const candidateSessionToken = sessionFromCookie || sessionFromHeader;
+    if (candidateSessionToken) {
+      const claims = verifyJudgeSessionToken(candidateSessionToken);
+      if (claims) {
+        return {
+          ok: true,
+          authMode: "local_demo",
+          actor: {
+            kind: "user",
+            userId: claims.sub,
+          },
+        };
+      }
     }
 
     const actorId = headers.get("x-actor-id")?.trim();

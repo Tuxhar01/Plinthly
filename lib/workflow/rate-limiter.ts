@@ -86,6 +86,11 @@ export const shippingQuoteLimiter = new RateLimiter({
   maxRequests: 30,     // 30 requests/min for Retailer shipping quotes
 });
 
+export const judgeSessionLimiter = new RateLimiter({
+  windowMs: 60 * 1000, // 1 minute
+  maxRequests: 10,     // 10 requests/min for judge session authentication
+});
+
 export function extractClientIdentifier(req: Request): string {
   const forwarded = req.headers.get("x-forwarded-for");
   if (forwarded) {

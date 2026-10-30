@@ -163,9 +163,28 @@ export type TransitionErrorCode =
   | "cross_purchase_reference"
   | "inconsistent_state";
 
+export interface AuditLineItemProposed {
+  id: string;
+  title: string;
+  quantity: number;
+  quantitySource?: string;
+  quantityConfirmed?: boolean;
+  originalInferredQuantity?: number | null;
+  confirmedAt?: string | null;
+  confirmedBy?: string | null;
+}
+
 export interface AuditPayloadProposed {
   budgetCents: number;
   currency: "USD";
+  destination?: unknown;
+  lineItems?: readonly AuditLineItemProposed[];
+  quantity?: number;
+  quantitySource?: string;
+  quantityConfirmed?: boolean;
+  originalInferredQuantity?: number | null;
+  confirmedAt?: string | null;
+  confirmedBy?: string | null;
 }
 
 export type AuditPayloadRequirementsConfirmed = Record<string, never>;

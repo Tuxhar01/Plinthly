@@ -7,7 +7,11 @@ import { Input } from "../ui/input";
 import { Field } from "../ui/field";
 import { Banner } from "../ui/banner";
 import { Textarea } from "../ui/textarea";
-import { createPurchaseApi, decomposePurchaseIntentApi } from "../../lib/workflow/client-api";
+import {
+  createPurchaseApi,
+  decomposePurchaseIntentApi,
+  confirmQuantityApi,
+} from "../../lib/workflow/client-api";
 import { PurchaseResponse } from "../../lib/workflow/types";
 import { DecomposedIntent } from "../../lib/ai/types";
 import { Sparkles } from "lucide-react";
@@ -35,11 +39,53 @@ export function PurchaseRequestCard({
 
   const [procurementMode, setProcurementMode] = React.useState<"single" | "multi">("single");
   const [multiItems, setMultiItems] = React.useState<
-    Array<{ id: string; title: string; quantity: number; budgetDollars: string }>
+    Array<{
+      id: string;
+      title: string;
+      quantity: number;
+      quantitySource: "explicit" | "inferred" | "unresolved" | "legacy_direct";
+      quantityConfirmed: boolean;
+      originalInferredQuantity: number | null;
+      confirmationToken?: string;
+      confirmedAt: string | null;
+      confirmedBy: string | null;
+      budgetDollars: string;
+      requirements?: Array<{ key: string; expectedValue?: string; description?: string }>;
+    }>
   >([
-    { id: "line_1", title: "Dell XPS 15 Laptop (32GB RAM)", quantity: 1, budgetDollars: "1500.00" },
-    { id: "line_2", title: "Dell UltraSharp 27 4K Monitor", quantity: 1, budgetDollars: "400.00" },
-    { id: "line_3", title: "USB-C Dual 4K Docking Station", quantity: 1, budgetDollars: "150.00" },
+    {
+      id: "line_1",
+      title: "Dell XPS 15 Laptop (32GB RAM)",
+      quantity: 1,
+      quantitySource: "explicit",
+      quantityConfirmed: true,
+      originalInferredQuantity: null,
+      confirmedAt: null,
+      confirmedBy: null,
+      budgetDollars: "1500.00",
+    },
+    {
+      id: "line_2",
+      title: "Dell UltraSharp 27 4K Monitor",
+      quantity: 1,
+      quantitySource: "explicit",
+      quantityConfirmed: true,
+      originalInferredQuantity: null,
+      confirmedAt: null,
+      confirmedBy: null,
+      budgetDollars: "400.00",
+    },
+    {
+      id: "line_3",
+      title: "USB-C Dual 4K Docking Station",
+      quantity: 1,
+      quantitySource: "explicit",
+      quantityConfirmed: true,
+      originalInferredQuantity: null,
+      confirmedAt: null,
+      confirmedBy: null,
+      budgetDollars: "150.00",
+    },
   ]);
 
   const [budgetDollars, setBudgetDollars] = React.useState<string>("150.00");
@@ -48,11 +94,109 @@ export function PurchaseRequestCard({
     "merchant_spec: Dell XPS 15 or equivalent\nreputation_check: Approved Merchant\nfreshness: Valid recent capture"
   );
   const [quantity, setQuantity] = React.useState<number>(1);
+  const [quantitySource, setQuantitySource] = React.useState<
+    "explicit" | "inferred" | "unresolved" | "legacy_direct"
+  >("explicit");
+  const [quantityConfirmed, setQuantityConfirmed] = React.useState<boolean>(true);
+  const [originalInferredQuantity, setOriginalInferredQuantity] = React.useState<number | null>(null);
+  const [singleConfirmationToken, setSingleConfirmationToken] = React.useState<string | undefined>(undefined);
+
   const [idempotencyKey, setIdempotencyKey] = React.useState<string>("");
   const [loading, setLoading] = React.useState<boolean>(false);
   const [clientErrors, setClientErrors] = React.useState<Record<string, string>>({});
   const [serverError, setServerError] = React.useState<string | null>(null);
   const [successMessage, setSuccessMessage] = React.useState<string | null>(null);
+
+  const handleConfirmLineItemQuantity = async (idx: number) => {
+    const item = multiItems[idx];
+    if (!item) return;
+
+    const totalBudgetCents = multiItems.reduce(
+      (sum, it) => sum + Math.round((parseFloat(it.budgetDollars) || 0) * 100),
+      0
+    );
+
+    const draft = {
+      budgetCents: totalBudgetCents,
+      currency: "USD",
+      lineItems: multiItems.map((it) => ({
+        id: it.id,
+        title: it.title,
+        budgetCents: Math.round((parseFloat(it.budgetDollars) || 0) * 100),
+        requirements: it.requirements || [],
+      })),
+    };
+
+    setLoading(true);
+    setServerError(null);
+    try {
+      const res = await confirmQuantityApi(
+        {
+          draft,
+          lineItemId: item.id,
+          confirmedQuantity: item.quantity,
+        },
+        { actorId }
+      );
+
+      if (!res.ok) {
+        setServerError(`[${res.error.code}] ${res.error.message}`);
+        return;
+      }
+
+      const conf = res.data.confirmation;
+      setMultiItems((prev) => {
+        const updated = [...prev];
+        updated[idx] = {
+          ...item,
+          quantityConfirmed: true,
+          confirmationToken: conf.confirmationToken,
+          confirmedAt: conf.confirmedAt,
+          confirmedBy: conf.confirmedBy,
+        };
+        return updated;
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleConfirmSingleQuantity = async () => {
+    const parsedDollars = parseFloat(budgetDollars);
+    const budgetCents = Math.round((isNaN(parsedDollars) ? 0 : parsedDollars) * 100);
+
+    const draft = {
+      budgetCents,
+      currency: "USD",
+      requirements: requirementsText
+        .split("\n")
+        .map((r) => r.trim())
+        .filter((r) => r.length > 0),
+    };
+
+    setLoading(true);
+    setServerError(null);
+    try {
+      const res = await confirmQuantityApi(
+        {
+          draft,
+          lineItemId: "single_item",
+          confirmedQuantity: quantity,
+        },
+        { actorId }
+      );
+
+      if (!res.ok) {
+        setServerError(`[${res.error.code}] ${res.error.message}`);
+        return;
+      }
+
+      setSingleConfirmationToken(res.data.confirmation.confirmationToken);
+      setQuantityConfirmed(true);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleDecompose = async () => {
     const trimmed = naturalLanguagePrompt.trim();
@@ -75,9 +219,22 @@ export function PurchaseRequestCard({
         if (data.budgetCents !== null) {
           setBudgetDollars((data.budgetCents / 100).toFixed(2));
         }
-        if (data.quantity !== null) {
+
+        // Single-item quantity handling:
+        if (data.quantity !== null && data.quantitySource === "explicit") {
           setQuantity(data.quantity);
+          setQuantitySource("explicit");
+          setQuantityConfirmed(true);
+          setOriginalInferredQuantity(null);
+          setSingleConfirmationToken(undefined);
+        } else {
+          setQuantity(1);
+          setQuantitySource("inferred");
+          setQuantityConfirmed(false);
+          setOriginalInferredQuantity(1);
+          setSingleConfirmationToken(undefined);
         }
+
         if (data.destination?.postalCode) {
           setPostalCode(data.destination.postalCode);
         }
@@ -86,6 +243,35 @@ export function PurchaseRequestCard({
             .map((r) => (r.expectedValue ? `${r.key}: ${r.expectedValue}` : r.key))
             .join("\n");
           setRequirementsText(formatted);
+        }
+
+        // Multi-Item mode integration:
+        if (data.lineItems && data.lineItems.length > 1) {
+          setProcurementMode("multi");
+          setMultiItems(
+            data.lineItems.map((item, idx) => {
+              const isInferred =
+                item.quantity === null ||
+                item.quantitySource === "inferred" ||
+                item.quantitySource === "unresolved";
+              return {
+                id: `line_${idx + 1}`,
+                title: item.title.trim() || `Item ${idx + 1}`,
+                quantity: item.quantity && item.quantity >= 1 ? item.quantity : 1,
+                quantitySource: isInferred ? ("inferred" as const) : ("explicit" as const),
+                quantityConfirmed: !isInferred, // Inferred quantities start UNCONFIRMED (false)
+                originalInferredQuantity: isInferred ? (item.originalInferredQuantity ?? 1) : null,
+                confirmationToken: undefined,
+                confirmedAt: !isInferred ? new Date().toISOString() : null,
+                confirmedBy: !isInferred ? actorId : null,
+                budgetDollars:
+                  item.budgetCents !== null && item.budgetCents !== undefined && item.budgetCents > 0
+                    ? (item.budgetCents / 100).toFixed(2)
+                    : "",
+                requirements: item.requirements || [],
+              };
+            })
+          );
         }
       }
     } finally {
@@ -113,6 +299,13 @@ export function PurchaseRequestCard({
           errors[`item_${i}_quantity`] = "Quantity must be an integer >= 1.";
         }
       }
+
+      const unconfirmed = multiItems.filter(
+        (item) => item.quantitySource === "inferred" && !item.quantityConfirmed
+      );
+      if (unconfirmed.length > 0) {
+        errors.multiItems = `Cannot submit purchase: ${unconfirmed.length} line item(s) have unconfirmed inferred quantities. Please click "Confirm" or edit quantity for each item.`;
+      }
     } else {
       const parsedDollars = parseFloat(budgetDollars);
       if (isNaN(parsedDollars) || parsedDollars <= 0) {
@@ -129,6 +322,10 @@ export function PurchaseRequestCard({
 
       if (quantity < 1 || !Number.isInteger(quantity)) {
         errors.quantity = "Quantity must be an integer of 1 or greater.";
+      }
+
+      if (quantitySource === "inferred" && !quantityConfirmed) {
+        errors.quantity = 'Inferred quantity requires explicit confirmation. Please click "Confirm" or edit quantity.';
       }
     }
 
@@ -171,7 +368,7 @@ export function PurchaseRequestCard({
       quantity: number;
       budgetCents: number;
       currency: "USD";
-      requirements: [];
+      requirements: Array<string | { key: string; expectedValue?: string; description?: string }>;
       verificationLevel: "standard";
     }> | undefined;
     let requestedQuantity: number;
@@ -186,9 +383,13 @@ export function PurchaseRequestCard({
         id: item.id,
         title: item.title.trim(),
         quantity: item.quantity,
+        quantitySource: item.quantitySource,
+        quantityConfirmed: item.quantityConfirmed,
+        originalInferredQuantity: item.originalInferredQuantity,
+        confirmationToken: item.confirmationToken,
         budgetCents: Math.round((parseFloat(item.budgetDollars) || 0) * 100),
         currency: "USD" as const,
-        requirements: [],
+        requirements: item.requirements || [],
         verificationLevel: "standard" as const,
       }));
     } else {
@@ -222,6 +423,10 @@ export function PurchaseRequestCard({
           requirements: procurementMode === "multi" ? [] : singleRequirements,
           lineItems: lineItemReqs,
           requestedQuantity,
+          quantitySource: procurementMode === "single" ? quantitySource : undefined,
+          quantityConfirmed: procurementMode === "single" ? quantityConfirmed : undefined,
+          originalInferredQuantity: procurementMode === "single" ? originalInferredQuantity : undefined,
+          confirmationToken: procurementMode === "single" ? singleConfirmationToken : undefined,
           destination,
           confirmImmediately: true,
           idempotencyKey: effectiveKey,
@@ -407,20 +612,64 @@ export function PurchaseRequestCard({
               <Field
                 label="Requested Quantity"
                 htmlFor="purchase-quantity"
-                hint="Number of units"
+                hint={
+                  quantitySource === "inferred" && !quantityConfirmed
+                    ? "Inferred quantity requires explicit buyer confirmation"
+                    : "Number of units"
+                }
                 error={clientErrors.quantity}
               >
-                <Input
-                  id="purchase-quantity"
-                  type="number"
-                  min="1"
-                  step="1"
-                  value={quantity}
-                  onChange={(e) => setQuantity(parseInt(e.target.value, 10) || 1)}
-                  error={Boolean(clientErrors.quantity)}
-                  disabled={loading}
-                  required
-                />
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex gap-2 items-center">
+                    <Input
+                      id="purchase-quantity"
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={quantity}
+                      onChange={(e) => {
+                        const parsed = parseInt(e.target.value, 10);
+                        const newQty = Number.isInteger(parsed) && parsed >= 1 ? parsed : 1;
+                        const isRevertedToInferred =
+                          originalInferredQuantity !== null && newQty === originalInferredQuantity;
+                        if (isRevertedToInferred) {
+                          setQuantity(newQty);
+                          setQuantitySource("inferred");
+                          setQuantityConfirmed(false);
+                          setSingleConfirmationToken(undefined);
+                        } else {
+                          setQuantity(newQty);
+                          setQuantitySource("explicit");
+                          setQuantityConfirmed(true);
+                          setSingleConfirmationToken(undefined);
+                        }
+                      }}
+                      error={Boolean(clientErrors.quantity)}
+                      disabled={loading}
+                      className={
+                        quantitySource === "inferred" && !quantityConfirmed
+                          ? "border-amber-400 bg-amber-50/40 text-amber-950 font-medium"
+                          : ""
+                      }
+                      required
+                    />
+                    {quantitySource === "inferred" && !quantityConfirmed ? (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={handleConfirmSingleQuantity}
+                        disabled={loading}
+                        className="text-xs py-1.5 px-3 bg-amber-100 text-amber-900 border border-amber-300 hover:bg-amber-200 whitespace-nowrap font-medium"
+                      >
+                        ⚠️ Confirm ({quantity})
+                      </Button>
+                    ) : quantitySource === "inferred" && quantityConfirmed ? (
+                      <span className="text-xs text-emerald-700 font-medium whitespace-nowrap flex items-center gap-1">
+                        ✓ Confirmed
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
               </Field>
 
               <Field
@@ -513,6 +762,11 @@ export function PurchaseRequestCard({
                         id: `line_${multiItems.length + 1}`,
                         title: "",
                         quantity: 1,
+                        quantitySource: "explicit",
+                        quantityConfirmed: true,
+                        originalInferredQuantity: null,
+                        confirmedAt: new Date().toISOString(),
+                        confirmedBy: actorId,
                         budgetDollars: "50.00",
                       },
                     ])
@@ -544,7 +798,15 @@ export function PurchaseRequestCard({
                         value={item.title}
                         onChange={(e) => {
                           const updated = [...multiItems];
-                          updated[idx] = { ...item, title: e.target.value };
+                          const it = updated[idx];
+                          const isConfInferred = it.quantitySource === "inferred" && it.quantityConfirmed;
+                          updated[idx] = {
+                            ...it,
+                            title: e.target.value,
+                            ...(isConfInferred
+                              ? { quantityConfirmed: false, confirmationToken: undefined, confirmedAt: null, confirmedBy: null }
+                              : {}),
+                          };
                           setMultiItems(updated);
                         }}
                         disabled={loading}
@@ -556,23 +818,63 @@ export function PurchaseRequestCard({
                         </span>
                       )}
                     </div>
-                    <div className="w-24">
+                    <div className="w-32 flex flex-col gap-1">
                       <Input
                         type="number"
                         min="1"
                         step="1"
                         value={item.quantity}
                         onChange={(e) => {
+                          const parsed = parseInt(e.target.value, 10);
+                          const newQty = Number.isInteger(parsed) && parsed >= 1 ? parsed : 1;
+                          const isRevertedToInferred =
+                            item.originalInferredQuantity !== null && newQty === item.originalInferredQuantity;
                           const updated = [...multiItems];
-                          updated[idx] = {
-                            ...item,
-                            quantity: parseInt(e.target.value, 10) || 1,
-                          };
+                          if (isRevertedToInferred) {
+                            updated[idx] = {
+                              ...item,
+                              quantity: newQty,
+                              quantitySource: "inferred",
+                              quantityConfirmed: false,
+                              confirmationToken: undefined,
+                              confirmedAt: null,
+                              confirmedBy: null,
+                            };
+                          } else {
+                            updated[idx] = {
+                              ...item,
+                              quantity: newQty,
+                              quantitySource: "explicit",
+                              quantityConfirmed: true,
+                              confirmationToken: undefined,
+                              confirmedAt: new Date().toISOString(),
+                              confirmedBy: actorId,
+                            };
+                          }
                           setMultiItems(updated);
                         }}
                         disabled={loading}
-                        className="text-xs"
+                        className={`text-xs ${
+                          item.quantitySource === "inferred" && !item.quantityConfirmed
+                            ? "border-amber-400 bg-amber-50/40 text-amber-950 font-medium"
+                            : ""
+                        }`}
                       />
+                      {item.quantitySource === "inferred" && !item.quantityConfirmed ? (
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          onClick={() => handleConfirmLineItemQuantity(idx)}
+                          disabled={loading}
+                          className="text-[10px] py-0.5 px-1 bg-amber-100 text-amber-900 border border-amber-300 hover:bg-amber-200 font-medium"
+                        >
+                          ⚠️ Confirm ({item.quantity})
+                        </Button>
+                      ) : item.quantitySource === "inferred" && item.quantityConfirmed ? (
+                        <span className="text-[10px] text-emerald-700 font-medium flex items-center gap-1">
+                          ✓ Confirmed
+                        </span>
+                      ) : null}
                     </div>
                     <div className="w-32 relative">
                       <span className="absolute left-2.5 top-2 text-xs text-[var(--ink-muted)]">
@@ -585,7 +887,15 @@ export function PurchaseRequestCard({
                         value={item.budgetDollars}
                         onChange={(e) => {
                           const updated = [...multiItems];
-                          updated[idx] = { ...item, budgetDollars: e.target.value };
+                          const it = updated[idx];
+                          const isConfInferred = it.quantitySource === "inferred" && it.quantityConfirmed;
+                          updated[idx] = {
+                            ...it,
+                            budgetDollars: e.target.value,
+                            ...(isConfInferred
+                              ? { quantityConfirmed: false, confirmationToken: undefined, confirmedAt: null, confirmedBy: null }
+                              : {}),
+                          };
                           setMultiItems(updated);
                         }}
                         disabled={loading}
@@ -642,7 +952,18 @@ export function PurchaseRequestCard({
           </div>
 
           <div className="pt-2 sm:pt-5">
-            <Button type="submit" variant="primary" loading={loading} className="w-full sm:w-auto">
+            <Button
+              type="submit"
+              variant="primary"
+              loading={loading}
+              disabled={
+                loading ||
+                (procurementMode === "multi"
+                  ? multiItems.some((i) => i.quantitySource === "inferred" && !i.quantityConfirmed)
+                  : quantitySource === "inferred" && !quantityConfirmed)
+              }
+              className="w-full sm:w-auto"
+            >
               Submit Purchase Request
             </Button>
           </div>

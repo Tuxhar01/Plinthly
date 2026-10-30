@@ -19,6 +19,9 @@ export const requirementItemSchema = z.union([
   }),
 ]);
 
+export const clientQuantityProvenanceSchema = z.enum(["explicit", "inferred", "unresolved", "manual_override"]);
+export const quantityProvenanceSchema = z.enum(["explicit", "inferred", "unresolved", "manual_override", "legacy_direct"]);
+
 /**
  * Line item schema for multi-item procurement requests.
  */
@@ -26,6 +29,10 @@ export const procurementLineItemSchema = z.object({
   id: z.string().trim().min(1, "line item id cannot be empty"),
   title: z.string().trim().min(1, "title cannot be empty"),
   quantity: z.number().int().min(1, "quantity must be at least 1"),
+  quantitySource: clientQuantityProvenanceSchema.optional(),
+  quantityConfirmed: z.boolean().optional(),
+  originalInferredQuantity: z.number().int().positive().nullable().optional(),
+  confirmationToken: z.string().trim().min(1).optional(),
   budgetCents: z.number().int().min(0).max(MAX_CENTS).optional(),
   currency: z.literal("USD").default("USD"),
   requirements: z.array(requirementItemSchema).optional().default([]),
@@ -37,14 +44,17 @@ export const procurementLineItemSchema = z.object({
  * Schema for POST /api/purchases
  */
 export const createPurchaseSchema = z.object({
+  draftId: z.string().trim().min(1).optional(),
+  confirmationTokens: z.array(z.string().trim().min(1)).optional(),
   budgetCents: z
     .number({ message: "budgetCents must be a number" })
     .int("budgetCents must be an integer")
     .positive("budgetCents must be greater than zero")
-    .max(MAX_CENTS, `budgetCents exceeds maximum allowed (${MAX_CENTS})`),
+    .max(MAX_CENTS, `budgetCents exceeds maximum allowed (${MAX_CENTS})`)
+    .optional(),
   currency: z.literal("USD", {
     message: 'Only "USD" currency is supported',
-  }),
+  }).default("USD"),
   requirements: z
     .array(requirementItemSchema, { message: "requirements must be an array" })
     .default([]),
@@ -55,6 +65,10 @@ export const createPurchaseSchema = z.object({
     .min(1, "requestedQuantity must be at least 1")
     .optional()
     .default(1),
+  quantitySource: clientQuantityProvenanceSchema.optional(),
+  quantityConfirmed: z.boolean().optional(),
+  originalInferredQuantity: z.number().int().positive().nullable().optional(),
+  confirmationToken: z.string().trim().min(1).optional(),
   destination: destinationContextSchema.optional(),
   confirmImmediately: z.boolean().optional().default(true),
   idempotencyKey: z
@@ -63,8 +77,37 @@ export const createPurchaseSchema = z.object({
     .max(128, "idempotencyKey cannot exceed 128 characters")
     .optional(),
 }).refine(
-  (data) => (data.requirements && data.requirements.length > 0) || (data.lineItems && data.lineItems.length > 0),
-  { message: "Either requirements or lineItems must be provided", path: ["requirements"] }
+  (data) => Boolean(data.draftId) || (data.requirements && data.requirements.length > 0) || (data.lineItems && data.lineItems.length > 0),
+  { message: "Either draftId, requirements, or lineItems must be provided", path: ["requirements"] }
+).refine(
+  (data) => Boolean(data.draftId) || typeof data.budgetCents === "number",
+  { message: "budgetCents is required when draftId is not provided", path: ["budgetCents"] }
+).refine(
+  (data) => {
+    // If draftId is provided, line items and tokens are validated against the server-owned draft
+    if (data.draftId) return true;
+
+    // Multi-item requests:
+    if (data.lineItems && data.lineItems.length > 0) {
+      return data.lineItems.every((item) => {
+        if (item.quantitySource === "explicit") {
+          return item.quantityConfirmed !== false;
+        }
+        // Inferred, manual_override, unresolved, or missing provenance requires an authenticated server confirmation token
+        return Boolean(item.confirmationToken && item.confirmationToken.length > 0);
+      });
+    }
+    // Single-item requests:
+    if (data.quantitySource === "inferred" || data.quantitySource === "unresolved" || data.quantitySource === "manual_override") {
+      return Boolean(data.confirmationToken && data.confirmationToken.length > 0);
+    }
+    return true;
+  },
+  {
+    message:
+      "Inferred or unverified line item quantity requires explicit buyer confirmation token before submission",
+    path: ["lineItems"],
+  }
 );
 
 /**

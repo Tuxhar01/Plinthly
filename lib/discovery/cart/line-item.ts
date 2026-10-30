@@ -11,13 +11,20 @@
 
 import { Currency } from "../../state/types";
 import { BuyerRequirementItem } from "../../workflow/types";
-import { ProcurementLineItem, VerificationLevel } from "./types";
+import { ProcurementLineItem, QuantityProvenanceSource, VerificationLevel } from "./types";
+import { verifyQuantityConfirmation } from "../../workflow/quantity-confirmation";
 
 export interface LineItemValidationError {
   readonly lineItemId?: string;
   readonly code:
     | "duplicate_line_item_id"
     | "invalid_quantity"
+    | "unconfirmed_inferred_quantity"
+    | "unauthorized_legacy_provenance"
+    | "invalid_confirmation_token"
+    | "confirmation_actor_mismatch"
+    | "confirmation_quantity_mismatch"
+    | "confirmation_draft_mismatch"
     | "invalid_budget"
     | "unsupported_currency"
     | "missing_product_description"
@@ -30,12 +37,22 @@ export type LineItemValidationResult =
   | { readonly ok: true; readonly lineItems: readonly ProcurementLineItem[] }
   | { readonly ok: false; readonly errors: readonly LineItemValidationError[] };
 
+export interface ValidateProcurementLineItemsOptions {
+  isLegacyCompatibilityPath?: boolean;
+  workflowContext?: "ai_decomposed" | "legacy_direct" | "manual_direct" | "manual_multi_item";
+  confirmedAt?: string | null;
+  confirmedBy?: string | null;
+  draftHash?: string;
+  actorId?: string;
+}
+
 /**
  * Validates a collection of procurement line items against strict Plinthly integrity constraints.
  */
 export function validateProcurementLineItems(
   items: unknown,
-  defaultCurrency: Currency = "USD"
+  defaultCurrency: Currency = "USD",
+  options?: ValidateProcurementLineItemsOptions
 ): LineItemValidationResult {
   if (!Array.isArray(items) || items.length === 0) {
     return {
@@ -89,17 +106,128 @@ export function validateProcurementLineItems(
 
     // 3. Quantity check: integer >= 1
     const quantity = raw.quantity;
-    if (
-      typeof quantity !== "number" ||
-      !Number.isInteger(quantity) ||
-      Number.isNaN(quantity) ||
-      quantity < 1
-    ) {
+    const hasValidQuantity =
+      typeof quantity === "number" &&
+      Number.isInteger(quantity) &&
+      !Number.isNaN(quantity) &&
+      quantity >= 1;
+
+    if (!hasValidQuantity) {
       errors.push({
         lineItemId: id,
         code: "invalid_quantity",
         message: `Line item "${id}" quantity must be a positive integer greater than or equal to 1, received: ${quantity}.`,
       });
+    }
+
+    // 3b. Quantity Provenance and Confirmation Safeguard:
+    let quantitySource: QuantityProvenanceSource;
+    let quantityConfirmed = false;
+    let confirmedAt: string | null = null;
+    let confirmedBy: string | null = null;
+    const confirmationToken =
+      typeof raw.confirmationToken === "string" && raw.confirmationToken.trim().length > 0
+        ? raw.confirmationToken.trim()
+        : undefined;
+    const originalInferredQuantity: number | null =
+      typeof raw.originalInferredQuantity === "number" ? raw.originalInferredQuantity : null;
+
+    const isLegacyAuthorized = Boolean(
+      options?.isLegacyCompatibilityPath || options?.workflowContext === "legacy_direct"
+    );
+
+    if (raw.quantitySource === "legacy_direct" && !isLegacyAuthorized) {
+      errors.push({
+        lineItemId: id,
+        code: "unauthorized_legacy_provenance",
+        message: `Line item "${id}" cannot specify internal provenance "legacy_direct".`,
+      });
+      quantitySource = "unresolved";
+    } else if (isLegacyAuthorized) {
+      quantitySource = raw.quantitySource ?? "legacy_direct";
+      quantityConfirmed = true;
+      confirmedAt = options?.confirmedAt ?? null;
+      confirmedBy = options?.confirmedBy ?? null;
+    } else if (raw.quantitySource === "explicit") {
+      quantitySource = "explicit";
+      quantityConfirmed = raw.quantityConfirmed !== false;
+      confirmedAt = options?.confirmedAt ?? null;
+      confirmedBy = options?.confirmedBy ?? null;
+    } else if (
+      raw.quantitySource === "inferred" ||
+      raw.quantitySource === "unresolved" ||
+      raw.quantitySource === "manual_override" ||
+      options?.workflowContext === "ai_decomposed"
+    ) {
+      quantitySource =
+        raw.quantitySource === "inferred" ||
+        raw.quantitySource === "unresolved" ||
+        raw.quantitySource === "manual_override"
+          ? raw.quantitySource
+          : "unresolved";
+
+      if (!confirmationToken) {
+        errors.push({
+          lineItemId: id,
+          code: "unconfirmed_inferred_quantity",
+          message: `Line item "${id}" has an unconfirmed inferred quantity (${quantity}). Buyer confirmation is required before submission.`,
+        });
+      } else {
+        const receipt = verifyQuantityConfirmation(confirmationToken);
+        if (!receipt) {
+          errors.push({
+            lineItemId: id,
+            code: "invalid_confirmation_token",
+            message: `Line item "${id}" has an invalid or forged confirmation token.`,
+          });
+        } else if (receipt.lineItemId !== id) {
+          errors.push({
+            lineItemId: id,
+            code: "invalid_confirmation_token",
+            message: `Line item "${id}" confirmation token was issued for a different line item ("${receipt.lineItemId}").`,
+          });
+        } else if (receipt.confirmedQuantity !== quantity) {
+          errors.push({
+            lineItemId: id,
+            code: "confirmation_quantity_mismatch",
+            message: `Line item "${id}" quantity (${quantity}) does not match confirmed quantity (${receipt.confirmedQuantity}).`,
+          });
+        } else if (options?.actorId && receipt.actorId !== options.actorId) {
+          errors.push({
+            lineItemId: id,
+            code: "confirmation_actor_mismatch",
+            message: `Line item "${id}" confirmation was issued for actor "${receipt.actorId}", but current actor is "${options.actorId}".`,
+          });
+        } else if (options?.draftHash && receipt.draftHash !== options.draftHash) {
+          errors.push({
+            lineItemId: id,
+            code: "confirmation_draft_mismatch",
+            message: `Line item "${id}" confirmation token draft hash does not match current draft state.`,
+          });
+        } else {
+          quantityConfirmed = true;
+          confirmedAt = receipt.confirmedAt ?? null;
+          confirmedBy = receipt.actorId;
+        }
+      }
+    } else {
+      // Direct programmatic caller providing explicit integer quantity
+      if (raw.quantityConfirmed === false) {
+        quantitySource = "unresolved";
+        quantityConfirmed = false;
+        if (hasValidQuantity) {
+          errors.push({
+            lineItemId: id,
+            code: "unconfirmed_inferred_quantity",
+            message: `Line item "${id}" has an unconfirmed quantity. Buyer confirmation is required before submission.`,
+          });
+        }
+      } else {
+        quantitySource = "explicit";
+        quantityConfirmed = true;
+        confirmedAt = options?.confirmedAt ?? null;
+        confirmedBy = options?.confirmedBy ?? null;
+      }
     }
 
     // 4. Budget check
@@ -158,6 +286,12 @@ export function validateProcurementLineItems(
       id,
       title: rawTitle,
       quantity: typeof quantity === "number" && Number.isInteger(quantity) && quantity >= 1 ? quantity : 1,
+      quantitySource,
+      quantityConfirmed,
+      originalInferredQuantity,
+      confirmationToken,
+      confirmedAt,
+      confirmedBy,
       budgetCents: raw.budgetCents,
       currency: "USD",
       requirements,
@@ -210,6 +344,11 @@ export function convertLegacyRequirementsToLineItems(
       id: "line_1",
       title,
       quantity: Number.isInteger(requestedQuantity) && requestedQuantity >= 1 ? requestedQuantity : 1,
+      quantitySource: "legacy_direct",
+      quantityConfirmed: true,
+      originalInferredQuantity: null,
+      confirmedAt: new Date().toISOString(),
+      confirmedBy: "legacy_system",
       budgetCents,
       currency,
       requirements: normRequirements,

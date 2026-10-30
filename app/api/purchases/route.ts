@@ -27,7 +27,8 @@ export async function POST(request: Request) {
     const service = getPurchaseWorkflowService();
     const result = await service.createPurchase(
       { ...validatedInput, idempotencyKey },
-      actorResult.actor
+      actorResult.actor,
+      { workflowContext: "ai_decomposed" }
     );
 
     return NextResponse.json(result, { status: 201 });

@@ -277,7 +277,7 @@ export function PurchaseDashboard() {
 
             {/* Stage 1.5: Multi-Item Procurement Studio */}
             <MultiItemProcurementStudio
-              key={activePurchase.id}
+              key={`studio-${activePurchase.id}`}
               purchase={activePurchase}
               actorId={actorId}
               onRefreshRequested={handleRefreshActive}
@@ -309,7 +309,7 @@ export function PurchaseDashboard() {
 
             {/* Stage 5: Audit History */}
             <AuditCard
-              key={activePurchase.id}
+              key={`audit-${activePurchase.id}`}
               purchaseId={activePurchase.id}
               actorId={actorId}
             />

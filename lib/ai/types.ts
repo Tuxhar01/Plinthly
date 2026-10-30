@@ -32,6 +32,44 @@ export const decomposedRequirementSchema = z.object({
 
 export type DecomposedRequirement = z.infer<typeof decomposedRequirementSchema>;
 
+export const quantityProvenanceSourceSchema = z.enum([
+  "explicit",
+  "inferred",
+  "unresolved",
+  "manual_override",
+  "legacy_direct",
+]);
+export type QuantityProvenanceSource = z.infer<typeof quantityProvenanceSourceSchema>;
+
+/**
+ * Individual product line item extracted from a multi-item purchase intent.
+ */
+export const decomposedLineItemSchema = z.object({
+  title: z.string().trim().min(1, "Line item title cannot be empty."),
+  quantity: z
+    .preprocess(
+      (val) => (val === undefined || (typeof val === "number" && val <= 0) ? null : val),
+      z.number().int("Quantity must be an integer.").positive("Quantity must be positive.").nullable()
+    )
+    .optional(),
+  quantitySource: quantityProvenanceSourceSchema.optional(),
+  originalInferredQuantity: z.number().int().positive().nullable().optional(),
+  budgetCents: z
+    .preprocess(
+      (val) => (val === undefined || val === 0 || (typeof val === "number" && val <= 0) ? null : val),
+      z
+        .number()
+        .int("Budget cents must be an integer.")
+        .positive("Budget cents must be positive.")
+        .max(MAX_CENTS, `Budget cents cannot exceed ${MAX_CENTS}.`)
+        .nullable()
+    )
+    .optional(),
+  requirements: z.array(decomposedRequirementSchema).optional().default([]),
+});
+
+export type DecomposedLineItem = z.infer<typeof decomposedLineItemSchema>;
+
 /**
  * Minimal destination context extracted from natural language.
  */
@@ -100,9 +138,13 @@ export const decomposedIntentSchema = z.object({
         .positive("Quantity must be positive.")
         .nullable()
     ),
+  quantitySource: quantityProvenanceSourceSchema.optional(),
+  originalInferredQuantity: z.number().int().positive().nullable().optional(),
   productKeywords: z.string().min(1, "Product keywords cannot be empty."),
   destination: decomposedDestinationSchema.nullable().optional(),
   requirements: z.array(decomposedRequirementSchema),
+  lineItems: z
+    .preprocess((val) => (val === null ? undefined : val), z.array(decomposedLineItemSchema).optional()),
   unresolvedAmbiguities: z.array(z.string()),
   confidenceEstimate: confidenceEstimateSchema,
 });

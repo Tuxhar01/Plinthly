@@ -16,6 +16,8 @@ import { BuyerRequirementItem } from "../../workflow/types";
 
 export type VerificationLevel = "strict" | "standard" | "flexible";
 
+export type QuantityProvenanceSource = "explicit" | "inferred" | "unresolved" | "manual_override" | "legacy_direct";
+
 /**
  * A discrete buyer requirement for a specific product and quantity in a multi-item purchase.
  */
@@ -23,6 +25,12 @@ export interface ProcurementLineItem {
   readonly id: string;
   readonly title: string;
   readonly quantity: number;
+  readonly quantitySource?: QuantityProvenanceSource;
+  readonly quantityConfirmed?: boolean;
+  readonly originalInferredQuantity?: number | null;
+  readonly confirmationToken?: string;
+  readonly confirmedAt?: string | null;
+  readonly confirmedBy?: string | null;
   readonly budgetCents?: number;
   readonly currency: Currency;
   readonly requirements: readonly (string | BuyerRequirementItem)[];

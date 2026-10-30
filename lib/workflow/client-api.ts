@@ -358,3 +358,54 @@ export async function discoverCandidatesApi(
   }
 }
 
+export interface ConfirmQuantityApiResponse {
+  readonly ok: true;
+  readonly confirmation: {
+    readonly lineItemId: string;
+    readonly confirmedQuantity: number;
+    readonly confirmationToken: string;
+    readonly confirmedAt: string;
+    readonly confirmedBy: string;
+  };
+}
+
+export async function confirmQuantityApi(
+  payload: {
+    readonly draft?: {
+      readonly budgetCents?: number;
+      readonly currency?: string;
+      readonly lineItems?: readonly {
+        readonly id: string;
+        readonly title: string;
+        readonly budgetCents?: number | null;
+        readonly requirements?: unknown;
+      }[];
+      readonly requirements?: unknown;
+    };
+    readonly draftHash?: string;
+    readonly lineItemId: string;
+    readonly confirmedQuantity: number;
+  },
+  options?: ClientApiOptions
+): Promise<ApiResponse<ConfirmQuantityApiResponse>> {
+  try {
+    const headers = buildHeaders(options);
+    const res = await fetch("/api/purchases/confirm-quantity", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    });
+    return await handleFetchResponse<ConfirmQuantityApiResponse>(res);
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      error: {
+        code: "network_error",
+        message: err instanceof Error ? err.message : "Network error contacting server.",
+      },
+    };
+  }
+}
+
+

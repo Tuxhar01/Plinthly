@@ -205,6 +205,36 @@ export async function executeWithIdempotency<T>(
       );
     }
 
+    // 4. Catch race conflicts outside the failed transaction:
+    // If a concurrent transaction completed and committed the idempotency record while this request
+    // was in flight (causing an unexpected status or state transition error), reload the record:
+    try {
+      const committed = await repo.getIdempotencyRecord(actorId, operation, idempotencyKey);
+      if (committed) {
+        if (committed.expiresAt && now.getTime() >= committed.expiresAt.getTime()) {
+          throw new IdempotencyConflictError(
+            `Idempotency key "${idempotencyKey}" has expired and cannot be reused.`
+          );
+        }
+
+        if (committed.requestHash !== requestHash) {
+          throw new IdempotencyConflictError(
+            `Idempotency key "${idempotencyKey}" was previously used for operation "${operation}" with different request parameters.`
+          );
+        }
+
+        return {
+          cached: true,
+          status: committed.responseStatus,
+          body: committed.responseBody as T,
+        };
+      }
+    } catch (checkErr) {
+      if (checkErr instanceof IdempotencyConflictError) {
+        throw checkErr;
+      }
+    }
+
     // Pass through any other errors (validation, illegal transitions, etc.)
     throw error;
   }

@@ -74,12 +74,17 @@ model Purchase {
   version                    Int               @default(1)
   createdAt                  DateTime          @default(now())
   updatedAt                  DateTime          @updatedAt
+  originatingDraftId         String?
+  originatingDraft           ProcurementDraft? @relation("DraftPurchases", fields: [originatingDraftId], references: [id], onDelete: SetNull)
   candidates                 Candidate[]       @relation("PurchaseCandidates")
   selectedCandidate          Candidate?        @relation("SelectedCandidate", fields: [selectedCandidateId, id], references: [id, purchaseId], onDelete: Restrict)
   approvals                  Approval[]
   paymentAttempts            PaymentAttempt[]
   policyResults              PolicyResult[]
   auditEvents                AuditEvent[]
+  consumedConfirmations      QuantityConfirmation[] @relation("PurchaseConsumedConfirmations")
+
+  @@index([originatingDraftId])
 }
 
 model IdempotencyRecord {
@@ -200,3 +205,50 @@ model AuditEvent {
 
   @@index([purchaseId, createdAt])
 }
+
+model ProcurementDraft {
+  id            String                 @id @default(uuid())
+  actorId       String
+  version       Int                    @default(1)
+  budgetCents   Int?
+  currency      String                 @db.VarChar(3) @default("USD")
+  destination   Json?
+  lineItems     Json
+  requirements  Json?
+  originalPrompt String?
+  draftHash     String                 @db.Char(64)
+  status        String                 @default("ACTIVE")
+  createdAt     DateTime               @default(now())
+  updatedAt     DateTime               @updatedAt
+
+  confirmations QuantityConfirmation[]
+  purchases     Purchase[]             @relation("DraftPurchases")
+
+  @@index([actorId, status])
+  @@index([draftHash])
+}
+
+model QuantityConfirmation {
+  id                       String            @id @default(uuid())
+  draftId                  String
+  draft                    ProcurementDraft  @relation(fields: [draftId], references: [id], onDelete: Cascade)
+  lineItemId               String
+  actorId                  String
+  confirmedQuantity        Int
+  originalInferredQuantity Int?
+  quantitySource           String
+  draftHash                String            @db.Char(64)
+  draftVersion             Int               @default(1)
+  tokenJti                 String            @unique
+  tokenHash                String            @db.Char(64)
+  expiresAt                DateTime
+  consumedAt               DateTime?
+  consumedPurchaseId       String?
+  consumedPurchase         Purchase?         @relation("PurchaseConsumedConfirmations", fields: [consumedPurchaseId], references: [id], onDelete: Restrict)
+  createdAt                DateTime          @default(now())
+
+  @@index([draftId, lineItemId])
+  @@index([tokenJti])
+  @@index([consumedAt])
+}
+

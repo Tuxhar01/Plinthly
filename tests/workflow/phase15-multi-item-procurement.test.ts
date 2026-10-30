@@ -11,7 +11,7 @@
  * 7. PayPal Sandbox safety: zero PayPal calls when unapproved/invalid, multi-merchant transaction boundary enforcement, zero funds captured.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, beforeAll } from "vitest";
 import {
   validateProcurementLineItems,
   convertLegacyRequirementsToLineItems,
@@ -41,8 +41,15 @@ import { DestinationContext } from "../../lib/discovery/shipping";
 import { getMerchantPolicyRegistry } from "../../lib/discovery/merchant-policy-registry";
 import { PurchaseWorkflowService } from "../../lib/workflow/service";
 import { InMemoryPurchaseRepository } from "../../lib/workflow/repository";
+import { CreatePurchaseRequest } from "../../lib/workflow/types";
 import { PayPalSandboxClient } from "../../lib/paypal/client";
-import { Actor } from "../../lib/state/types";
+import { Actor, AuditPayloadProposed } from "../../lib/state/types";
+import { createPurchaseSchema } from "../../lib/workflow/validation";
+import { computeDraftHash, signQuantityConfirmation } from "../../lib/workflow/quantity-confirmation";
+
+beforeAll(() => {
+  process.env.CONFIRMATION_SIGNING_SECRET = "plinthly_test_secret_32_characters_long_minimum!!";
+});
 
 describe("PLINTHLY — PHASE 15: Multi-Item Procurement, Cart Aggregation & Split-Shipment Planning", () => {
   const defaultDestination: DestinationContext = {
@@ -137,8 +144,122 @@ describe("PLINTHLY — PHASE 15: Multi-Item Procurement, Cart Aggregation & Spli
       expect(lineItems).toHaveLength(1);
       expect(lineItems[0].id).toBe("line_1");
       expect(lineItems[0].quantity).toBe(2);
+      expect(lineItems[0].quantitySource).toBe("legacy_direct");
+      expect(lineItems[0].quantityConfirmed).toBe(true);
+      expect(lineItems[0].originalInferredQuantity).toBeNull();
       expect(lineItems[0].budgetCents).toBe(180000);
       expect(lineItems[0].requirements).toHaveLength(2);
+    });
+
+    it("1.6 rejects unconfirmed inferred quantities in new workflow", () => {
+      const unconfirmedLineItems = [
+        {
+          id: "item_laptop",
+          title: "Workstation Laptop",
+          quantity: 1,
+          quantitySource: "inferred" as const,
+          quantityConfirmed: false,
+          originalInferredQuantity: 1,
+          budgetCents: 150000,
+          currency: "USD" as const,
+        },
+      ];
+
+      const result = validateProcurementLineItems(unconfirmedLineItems);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.code === "unconfirmed_inferred_quantity")).toBe(true);
+      }
+    });
+
+    it("1.7 accepts buyer-confirmed inferred quantities with complete audit metadata", () => {
+      const nowIso = new Date().toISOString();
+      const token = signQuantityConfirmation({
+        actorId: "usr_buyer_1",
+        lineItemId: "item_laptop",
+        confirmedQuantity: 2,
+        draftHash: computeDraftHash({
+          budgetCents: 300000,
+          currency: "USD",
+          lineItems: [{ id: "item_laptop", title: "Workstation Laptop", budgetCents: 300000 }],
+        }),
+        confirmedAt: nowIso,
+      });
+
+      const confirmedLineItems = [
+        {
+          id: "item_laptop",
+          title: "Workstation Laptop",
+          quantity: 2, // Buyer edited from 1 to 2
+          quantitySource: "inferred" as const,
+          quantityConfirmed: true,
+          originalInferredQuantity: 1,
+          confirmationToken: token,
+          confirmedAt: nowIso,
+          confirmedBy: "usr_buyer_1",
+          budgetCents: 300000,
+          currency: "USD" as const,
+        },
+      ];
+
+      const result = validateProcurementLineItems(confirmedLineItems, "USD", {
+        actorId: "usr_buyer_1",
+        draftHash: computeDraftHash({
+          budgetCents: 300000,
+          currency: "USD",
+          lineItems: [{ id: "item_laptop", title: "Workstation Laptop", budgetCents: 300000 }],
+        }),
+      });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.lineItems[0].quantity).toBe(2);
+        expect(result.lineItems[0].originalInferredQuantity).toBe(1);
+        expect(result.lineItems[0].quantitySource).toBe("inferred");
+        expect(result.lineItems[0].quantityConfirmed).toBe(true);
+        expect(result.lineItems[0].confirmedBy).toBe("usr_buyer_1");
+      }
+    });
+
+    it("1.8 preserves explicit legacy compatibility path for legacy callers", () => {
+      const legacyRawItems = [
+        {
+          id: "item_legacy",
+          title: "Legacy Server Component",
+          quantity: 1,
+          budgetCents: 50000,
+          currency: "USD" as const,
+        },
+      ];
+
+      const result = validateProcurementLineItems(legacyRawItems, "USD", {
+        isLegacyCompatibilityPath: true,
+      });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.lineItems[0].quantitySource).toBe("legacy_direct");
+        expect(result.lineItems[0].quantityConfirmed).toBe(true);
+      }
+    });
+
+    it("1.9 blocks direct API bypass attempts with missing provenance metadata in AI workflow", () => {
+      const bypassAttempt = [
+        {
+          id: "item_bypass",
+          title: "Workstation Dock",
+          quantity: 1,
+          // Missing quantitySource and quantityConfirmed in new AI workflow
+          budgetCents: 15000,
+          currency: "USD" as const,
+        },
+      ];
+
+      const result = validateProcurementLineItems(bypassAttempt, "USD", {
+        workflowContext: "ai_decomposed",
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.code === "unconfirmed_inferred_quantity")).toBe(true);
+      }
     });
   });
 
@@ -939,6 +1060,266 @@ describe("PLINTHLY — PHASE 15: Multi-Item Procurement, Cart Aggregation & Spli
 
       expect(orderRes.paypalOrderId).toBe("ORDER_PAYPAL_TEST_1");
       expect(mockPayPal.createOrder).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("8. Inferred Quantity Safeguards and Audit Persistence", () => {
+    let repo: InMemoryPurchaseRepository;
+    let mockPayPal: PayPalSandboxClient;
+    let service: PurchaseWorkflowService;
+
+    beforeEach(() => {
+      repo = new InMemoryPurchaseRepository();
+      mockPayPal = {
+        createOrder: vi.fn(),
+        getOrder: vi.fn(),
+        capturePayment: vi.fn(),
+      } as unknown as PayPalSandboxClient;
+      service = new PurchaseWorkflowService(repo, mockPayPal);
+    });
+
+    it("8.1 service.createPurchase rejects unconfirmed inferred line items with ValidationError", async () => {
+      await expect(
+        service.createPurchase(
+          {
+            budgetCents: 150000,
+            currency: "USD",
+            lineItems: [
+              {
+                id: "line_1",
+                title: "Laptop",
+                quantity: 1,
+                quantitySource: "inferred",
+                quantityConfirmed: false,
+                originalInferredQuantity: 1,
+                currency: "USD",
+                requirements: [],
+              },
+            ],
+          },
+          humanBuyer
+        )
+      ).rejects.toThrow(/Invalid multi-item procurement line items/);
+    });
+
+    it("8.2 service.createPurchase records original inferred quantity, confirmed quantity, and confirmation metadata in proposed audit event", async () => {
+      const draftHash = computeDraftHash({
+        budgetCents: 205000,
+        currency: "USD",
+        lineItems: [
+          {
+            id: "line_1",
+            title: "Workstation Laptop",
+            quantity: 2,
+            budgetCents: 205000,
+            requirements: [{ key: "ram", expectedValue: "32GB" }],
+          },
+        ],
+      });
+
+      const token = signQuantityConfirmation({
+        actorId: humanBuyer.userId,
+        lineItemId: "line_1",
+        confirmedQuantity: 2,
+        draftHash,
+        confirmedAt: new Date().toISOString(),
+      });
+
+      const purchase = await service.createPurchase(
+        {
+          budgetCents: 205000,
+          currency: "USD",
+          lineItems: [
+            {
+              id: "line_1",
+              title: "Workstation Laptop",
+              quantity: 2,
+              quantitySource: "inferred",
+              quantityConfirmed: true,
+              originalInferredQuantity: 1,
+              budgetCents: 205000,
+              confirmationToken: token,
+              currency: "USD",
+              requirements: [{ key: "ram", expectedValue: "32GB" }],
+            },
+          ],
+        },
+        humanBuyer
+      );
+
+      const auditHistory = await repo.getAuditHistory(purchase.id);
+      const proposedEvent = auditHistory.find((e) => e.type === "proposed");
+      expect(proposedEvent).toBeDefined();
+
+      const payload = proposedEvent!.payload as unknown as AuditPayloadProposed;
+      expect(payload.lineItems).toBeDefined();
+      expect(payload.lineItems).toHaveLength(1);
+      expect(payload.lineItems![0].quantity).toBe(2);
+      expect(payload.lineItems![0].originalInferredQuantity).toBe(1);
+      expect(payload.lineItems![0].quantitySource).toBe("inferred");
+      expect(payload.lineItems![0].quantityConfirmed).toBe(true);
+      expect(payload.lineItems![0].confirmedBy).toBe(humanBuyer.userId);
+      expect(payload.lineItems![0].confirmedAt).toBeDefined();
+    });
+
+    it("8.3 rejects client-controlled legacy bypass attempts when inferred quantity is unconfirmed", async () => {
+      const bypassPayload = {
+        budgetCents: 205000,
+        currency: "USD",
+        isLegacyDirect: true,
+        lineItems: [
+          {
+            id: "line_bypass",
+            title: "Workstation Laptop",
+            quantity: 1,
+            quantitySource: "inferred" as const,
+            quantityConfirmed: false,
+            currency: "USD",
+            requirements: [],
+          },
+        ],
+      };
+
+      // Zod schema must reject the unconfirmed inferred line item regardless of client isLegacyDirect
+      const zodResult = createPurchaseSchema.safeParse(bypassPayload);
+      expect(zodResult.success).toBe(false);
+      if (!zodResult.success) {
+        expect(zodResult.error.issues[0]?.message).toContain(
+          "Inferred or unverified line item quantity requires explicit buyer confirmation"
+        );
+      }
+
+      // Service layer must also reject it when called without trusted server-side legacy context
+      await expect(
+        service.createPurchase(bypassPayload as unknown as CreatePurchaseRequest, humanBuyer)
+      ).rejects.toThrow(/Invalid multi-item procurement line items/);
+    });
+
+    it("8.4 prevents audit forgery: client-supplied confirmedBy and confirmedAt are overwritten by server actor and clock", async () => {
+      const draftHash = computeDraftHash({
+        budgetCents: 205000,
+        currency: "USD",
+        lineItems: [
+          {
+            id: "line_forged",
+            title: "Workstation Laptop",
+            budgetCents: null,
+          },
+        ],
+      });
+
+      const validToken = signQuantityConfirmation({
+        actorId: humanBuyer.userId,
+        lineItemId: "line_forged",
+        confirmedQuantity: 1,
+        draftHash,
+        confirmedAt: new Date().toISOString(),
+      });
+
+      const forgedPayload = {
+        budgetCents: 205000,
+        currency: "USD",
+        lineItems: [
+          {
+            id: "line_forged",
+            title: "Workstation Laptop",
+            quantity: 1,
+            quantitySource: "inferred" as const,
+            quantityConfirmed: true,
+            originalInferredQuantity: 1,
+            confirmationToken: validToken,
+            confirmedAt: "1999-01-01T00:00:00.000Z", // Spoofed historical time
+            confirmedBy: "forged_ceo_admin", // Spoofed identity
+            currency: "USD",
+            requirements: [],
+          },
+        ],
+      };
+
+      const beforeExecution = Date.now();
+      const purchase = await service.createPurchase(forgedPayload as unknown as CreatePurchaseRequest, humanBuyer);
+      const afterExecution = Date.now();
+
+      const auditHistory = await repo.getAuditHistory(purchase.id);
+      const proposedEvent = auditHistory.find((e) => e.type === "proposed");
+      expect(proposedEvent).toBeDefined();
+
+      const payload = proposedEvent!.payload as unknown as AuditPayloadProposed;
+      const storedItem = payload.lineItems![0];
+
+      // Forged values must NOT appear in audit log
+      expect(storedItem.confirmedBy).not.toBe("forged_ceo_admin");
+      expect(storedItem.confirmedBy).toBe(humanBuyer.userId);
+
+      expect(storedItem.confirmedAt).not.toBe("1999-01-01T00:00:00.000Z");
+      const confirmedTimeMs = new Date(storedItem.confirmedAt!).getTime();
+      expect(confirmedTimeMs).toBeGreaterThanOrEqual(beforeExecution - 2000);
+      expect(confirmedTimeMs).toBeLessThanOrEqual(afterExecution + 2000);
+    });
+
+    it("8.5 rejects multi-item requests with missing quantity provenance unless explicitly confirmed", async () => {
+      const missingProvenancePayload = {
+        budgetCents: 205000,
+        currency: "USD",
+        lineItems: [
+          {
+            id: "line_missing",
+            title: "Workstation Laptop",
+            quantity: 1,
+            // quantitySource omitted
+            // quantityConfirmed omitted
+            currency: "USD",
+            requirements: [],
+          },
+        ],
+      };
+
+      const zodResult = createPurchaseSchema.safeParse(missingProvenancePayload);
+      expect(zodResult.success).toBe(false);
+
+      await expect(
+        service.createPurchase(missingProvenancePayload as unknown as CreatePurchaseRequest, humanBuyer, {
+          workflowContext: "ai_decomposed",
+        })
+      ).rejects.toThrow(/Invalid multi-item procurement line items/);
+    });
+
+    it("8.6 allows legitimate legacy single-item callers without lineItems to proceed", async () => {
+      const legacyPayload = {
+        budgetCents: 150000,
+        currency: "USD" as const,
+        requirements: [{ key: "ram", expectedValue: "16GB", description: "16GB RAM" }],
+      };
+
+      const zodResult = createPurchaseSchema.safeParse(legacyPayload);
+      expect(zodResult.success).toBe(true);
+
+      const purchase = await service.createPurchase(legacyPayload, humanBuyer);
+      expect(purchase.id).toBeDefined();
+      expect(purchase.status).toBe("REQUIREMENTS_CONFIRMED");
+      expect(purchase.budgetCents).toBe(150000);
+    });
+
+    it("8.7 allows trusted server-side workflow context to execute legacy compatibility", async () => {
+      const legacyReq = {
+        budgetCents: 150000,
+        currency: "USD" as const,
+        lineItems: [
+          {
+            id: "legacy_item",
+            title: "Legacy Migrated Product",
+            quantity: 1,
+            currency: "USD" as const,
+            requirements: [],
+          },
+        ],
+      };
+
+      const purchase = await service.createPurchase(legacyReq, humanBuyer, {
+        workflowContext: "legacy_direct",
+      });
+      expect(purchase.id).toBeDefined();
+      expect(purchase.status).toBe("REQUIREMENTS_CONFIRMED");
     });
   });
 });
