@@ -1,0 +1,80 @@
+#### Routine `R2-ROUTINE-05`: `execute_capture_confirmation` (C-11, C-12, C-20, C-23, C-25, C-26, C-30)
+- **Canonical SQL Name:** `execute_capture_confirmation`
+- **Responsibility:** Reconciles an authenticated webhook transmission against an approved merchant cart, asserts order and payee provenance, records immutable payment evidence, and transitions cart status to `CAPTURED`.
+- **Trust Boundary:** Invoked by Payment Orchestrator (`app_orchestrator_role`). Executed via `SECURITY DEFINER` owned by `plinthly_security_admin` with fixed `SET search_path = extensions, pg_catalog;`.
+- **Parameters (5):** `p_cart_id UUID, p_transmission_id VARCHAR(64), p_capture_id VARCHAR(64), p_signing_key_id VARCHAR(64), p_nonce VARCHAR(64)`.
+- **Exact Lock Sequence (Strict Monotonic Level 0 $\rightarrow$ 5):**
+  1. **Level 0 (Advisory Mutex):** `PERFORM pg_advisory_xact_lock(hashtext('cart_checkout:' || p_cart_id::text));`
+  2. **Level 1 (Domain Cart Row Lock):**
+     ```sql
+     SELECT id, checkoutStatus, totalCartCents, paypalOrderId, merchantPayeeEmail
+       INTO v_cart_id, v_checkout_status, v_cart_total, v_cart_order_id, v_cart_payee
+       FROM ApprovedMerchantCart
+      WHERE id = p_cart_id
+        FOR UPDATE OF ApprovedMerchantCart;
+     ```
+     - Assert cart exists (`P0002`).
+     - **Idempotent Recovery Check:**
+       If `v_checkout_status = 'CAPTURED'`:
+       - Query `PaymentEvidenceRecord` for existing capture:
+         ```sql
+         SELECT pe.id, pe.recorded_at, pe.amount_cents
+           INTO v_evidence_id, v_recorded_at, v_evidence_amount
+           FROM PaymentEvidenceRecord pe
+          WHERE pe.cart_id = p_cart_id
+            FOR SHARE OF pe;
+         ```
+       - Return `(v_evidence_id, p_cart_id, 'CAPTURED', v_recorded_at, TRUE)`.
+     - Verify `v_checkout_status = 'CAPTURING'` (SQLSTATE `55000` / `ERR_INVALID_TRANSITION`).
+  3. **Level 2 (Transmission Row Lock):**
+     ```sql
+     SELECT wt.status, wt.authenticated_order_id, wt.authenticated_capture_id,
+            wt.authenticated_amount_cents, wt.authenticated_currency, wt.authenticated_payee_email,
+            wt.authenticated_event_type
+       INTO v_tx_status, v_tx_order_id, v_tx_capture_id,
+            v_tx_amount_cents, v_tx_currency, v_tx_payee_email, v_tx_event_type
+       FROM WebhookTransmission wt
+      WHERE wt.transmission_id = p_transmission_id
+        FOR SHARE OF wt;
+     ```
+     - Assert `v_tx_status = 'PROCESSED'` (`55000` / `ERR_TRANSMISSION_NOT_PROCESSED`).
+     - Assert `v_tx_event_type = 'PAYMENT.CAPTURE.COMPLETED'` (`22023`).
+     - Cross-assert order ID: `v_tx_order_id = v_cart_order_id` (`22023` / `ERR_ORDER_ID_MISMATCH`).
+     - Cross-assert payee: `v_tx_payee_email = v_cart_payee` (`22023` / `ERR_PAYEE_MISMATCH`).
+     - Cross-assert capture ID: `v_tx_capture_id = p_capture_id` (`22023` / `ERR_CAPTURE_ID_MISMATCH`).
+     - Cross-assert amount: `v_tx_amount_cents = v_cart_total` (`22023` / `ERR_AMOUNT_MISMATCH`).
+     - Assert currency: `v_tx_currency = 'USD'`.
+  4. **Level 3 (Audit Key Lock):**
+     ```sql
+     SELECT key_bytes, status FROM AuditSigningKey WHERE key_id = p_signing_key_id FOR SHARE;
+     ```
+     - Assert `status = 'ACTIVE'`.
+  5. **Level 4 (Nonce Registry Mutation):**
+     ```sql
+     INSERT INTO NonceRegistry (nonce, scope, target_id, request_digest, consumed_at, created_at)
+     VALUES (
+         p_nonce, 'capture_confirm', p_cart_id,
+         extensions.digest(p_cart_id::text || ':' || p_transmission_id || ':' || p_capture_id, 'sha256'),
+         clock_timestamp(), clock_timestamp()
+     );
+     ```
+  6. **Level 5 (State Mutation & Evidence Append):**
+     ```sql
+     INSERT INTO PaymentEvidenceRecord (
+         cart_id, transmission_id, capture_id, paypal_order_id, amount_cents, currency,
+         payee_email, internal_audit_signature, recorded_at
+     ) VALUES (
+         p_cart_id, p_transmission_id, p_capture_id, v_cart_order_id, v_tx_amount_cents,
+         v_tx_currency, v_tx_payee_email,
+         extensions.hmac(convert_to(p_cart_id::text || ':' || p_transmission_id || ':' || p_capture_id, 'UTF8'), v_key_bytes, 'sha256'),
+         clock_timestamp()
+     ) RETURNING id, recorded_at INTO v_evidence_id, v_recorded_at;
+
+     UPDATE ApprovedMerchantCart
+        SET checkoutStatus = 'CAPTURED', updatedAt = clock_timestamp()
+      WHERE id = p_cart_id;
+     ```
+- **Output:** Returns record `(payment_evidence_id UUID, cart_id UUID, status VARCHAR(32), recorded_at TIMESTAMPTZ, idempotent_retry BOOLEAN)`.
+
+---
+

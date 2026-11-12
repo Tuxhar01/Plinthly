@@ -1,0 +1,18 @@
+#### Routine `R2-ROUTINE-04`: `finalize_transmission_response`
+- **Canonical SQL Name:** `finalize_transmission_response`
+- **Responsibility:** Transitions `WebhookTransmission` status from `'RECORDED'` to `'PROCESSED'` or `'FAILED'`. Executed by `webhook_ingress_role`.
+- **Parameters (3):** `p_transmission_id VARCHAR(64), p_status VARCHAR(32), p_response_code INT`.
+- **Exact Lock Sequence:**
+  1. **Level 0 (Advisory Mutex):** `PERFORM pg_advisory_xact_lock(hashtext('transmission:' || p_transmission_id));`
+  2. **Level 2 (Transmission Row Lock):**
+     ```sql
+     SELECT status FROM WebhookTransmission WHERE transmission_id = p_transmission_id FOR UPDATE;
+     ```
+  3. **Level 5 (State Mutation):**
+     ```sql
+     UPDATE WebhookTransmission SET status = p_status, response_code = p_response_code WHERE transmission_id = p_transmission_id;
+     ```
+- **Output:** Returns record `(transmission_id VARCHAR(64), status VARCHAR(32))`.
+
+---
+

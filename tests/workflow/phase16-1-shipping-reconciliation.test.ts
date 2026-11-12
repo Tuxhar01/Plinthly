@@ -12,9 +12,14 @@
  * 5. Rechecks approval integrity, target cart isolation, and material change invalidation.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { planCartShipments } from "../../lib/discovery/cart/split-shipment";
-import { generateProcurementStrategies } from "../../lib/discovery/cart/strategy-engine";
+import {
+  generateProcurementStrategies,
+  setNonProductionTestTaxFixture,
+  clearNonProductionTestTaxFixture,
+  createDefensibleTestTaxQuote,
+} from "../../lib/discovery/cart/strategy-engine";
 import { CartItem, ProcurementLineItem } from "../../lib/discovery/cart/types";
 import { DestinationContext } from "../../lib/discovery/shipping";
 import { NormalizedProductCandidate } from "../../lib/discovery/types";
@@ -33,6 +38,14 @@ describe("Phase 16.1 — Shipping Evidence Audit and Reconciliation", () => {
     kind: "user",
     userId: "usr_buyer_p16_1",
   };
+
+  beforeEach(() => {
+    setNonProductionTestTaxFixture((dest) => createDefensibleTestTaxQuote({ destination: dest }));
+  });
+
+  afterEach(() => {
+    clearNonProductionTestTaxFixture();
+  });
 
   describe("1. Policy-Threshold vs Retailer Quote Separation", () => {
     it("assigns shippingEvidenceType: 'policy_derived' and isQuoteBound: false when free shipping threshold is met", () => {

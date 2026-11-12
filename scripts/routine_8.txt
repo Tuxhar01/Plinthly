@@ -1,0 +1,26 @@
+#### Routine `R2-ROUTINE-08`: `revoke_tax_authority_certificate`
+- **Canonical SQL Name:** `revoke_tax_authority_certificate`
+- **Responsibility:** Atomically transitions a `TaxAuthorityCertificate` from `ACTIVE` to `REVOKED`. Enforces safe idempotency and nonce ordering.
+- **Trust Boundary:** Administrative Console (`security_admin_user`) under role `admin_security_role`. Executed via `SECURITY DEFINER` owned by `plinthly_security_admin` with fixed `SET search_path = extensions, pg_catalog;`.
+- **Parameters (5):** `p_authority_id VARCHAR(64), p_certificate_number VARCHAR(64), p_revocation_reason TEXT, p_revoked_by VARCHAR(64), p_nonce VARCHAR(64)`.
+- **Exact Lock Sequence (Strict Monotonic Level 0 $\rightarrow$ 5):**
+  1. **Level 0 (Advisory Mutex):** `PERFORM pg_advisory_xact_lock(hashtext('cert_revocation:' || p_authority_id || ':' || p_certificate_number));`
+  2. **Level 3 (Target Certificate Row Lock):**
+     ```sql
+     SELECT status, revoked_at, revocation_reason FROM TaxAuthorityCertificate WHERE authority_id = p_authority_id AND certificate_number = p_certificate_number FOR UPDATE;
+     ```
+     - If not found: Raise SQLSTATE `P0002` (`ERR_CERTIFICATE_NOT_FOUND`).
+     - Idempotent Retry Check: If `status = 'REVOKED'`, query `NonceRegistry` under scope `'cert_revocation'`. If digest matches, return cached revocation record. Else raise SQLSTATE `55000` (`ERR_RESOURCE_ALREADY_REVOKED`).
+  3. **Level 4 (Nonce Registry Mutation):**
+     ```sql
+     INSERT INTO NonceRegistry (nonce, scope, target_id, request_digest, consumed_at, created_at)
+     VALUES (p_nonce, 'cert_revocation', p_authority_id || ':' || p_certificate_number, extensions.digest(p_revocation_reason, 'sha256'), clock_timestamp(), clock_timestamp());
+     ```
+  4. **Level 5 (State Mutation):**
+     ```sql
+     UPDATE TaxAuthorityCertificate SET status = 'REVOKED', revoked_at = clock_timestamp(), revocation_reason = p_revocation_reason, revoked_by = p_revoked_by WHERE authority_id = p_authority_id AND certificate_number = p_certificate_number;
+     ```
+- **Output:** Returns record `(authority_id VARCHAR(64), certificate_number VARCHAR(64), revoked_at TIMESTAMPTZ, status VARCHAR(16), idempotent_retry BOOLEAN)`.
+
+---
+

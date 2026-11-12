@@ -1,0 +1,74 @@
+#### Routine `R2-ROUTINE-06`: `record_cart_refund_attempt` (C-14, C-18, C-25, C-30)
+- **Canonical SQL Name:** `record_cart_refund_attempt`
+- **Responsibility:** Records gateway refund evidence, enforces provenance between refund transmission, capture, and cart, validates cumulative refund limits ($\sum \text{refunds} \le \text{captured}$), and updates cart status to `REFUNDED` or `PARTIALLY_REFUNDED`.
+- **Trust Boundary:** Invoked by Payment Orchestrator (`app_orchestrator_role`). Executed via `SECURITY DEFINER` owned by `plinthly_security_admin` with fixed `SET search_path = extensions, pg_catalog;`.
+- **Parameters (6):** `p_cart_id UUID, p_capture_id VARCHAR(64), p_transmission_id VARCHAR(64), p_signing_key_id VARCHAR(64), p_nonce VARCHAR(64), p_reason TEXT`.
+- **Exact Lock Sequence (Strict Monotonic Level 0 $\rightarrow$ 5):**
+  1. **Level 0 (Advisory Mutex):** `PERFORM pg_advisory_xact_lock(hashtext('cart_refund:' || p_cart_id::text));`
+  2. **Level 1 (Domain Records):**
+     ```sql
+     SELECT id, checkoutStatus, totalCartCents, paypalOrderId, merchantPayeeEmail, cumulativeRefundedCents
+       INTO v_cart_id, v_checkout_status, v_cart_total, v_cart_order_id, v_cart_payee, v_cum_refunded
+       FROM ApprovedMerchantCart
+      WHERE id = p_cart_id
+        FOR UPDATE OF ApprovedMerchantCart;
+     ```
+     - Assert `v_checkout_status IN ('CAPTURED', 'PARTIALLY_REFUNDED')`.
+     ```sql
+     SELECT id, amount_cents FROM PaymentEvidenceRecord WHERE cart_id = p_cart_id FOR SHARE;
+     ```
+  3. **Level 2 (Transmission Row Lock):**
+     ```sql
+     SELECT wt.status, wt.authenticated_order_id, wt.authenticated_capture_id,
+            wt.authenticated_refund_id, wt.authenticated_amount_cents, wt.authenticated_currency,
+            wt.authenticated_payee_email, wt.authenticated_event_type
+       INTO v_tx_status, v_tx_order_id, v_tx_capture_id,
+            v_authoritative_refund_id, v_refund_amount_cents, v_tx_currency,
+            v_tx_payee_email, v_tx_event_type
+       FROM WebhookTransmission wt
+      WHERE wt.transmission_id = p_transmission_id
+        FOR SHARE OF wt;
+     ```
+     - Assert `v_tx_status = 'PROCESSED'` and `v_tx_event_type = 'PAYMENT.CAPTURE.REFUNDED'`.
+     - Assert `v_authoritative_refund_id IS NOT NULL` (`22004` / `ERR_REFUND_ID_REQUIRED`).
+     - Assert `v_tx_capture_id = p_capture_id` and `v_tx_order_id = v_cart_order_id` and `v_tx_payee_email = v_cart_payee`.
+     - Cumulative invariant check:
+       `v_new_refunded_cents := v_cum_refunded + v_refund_amount_cents;`
+       `IF v_new_refunded_cents > v_cart_total THEN RAISE EXCEPTION ... ERR_REFUND_EXCEEDS_CAPTURE USING ERRCODE = '22003'; END IF;`
+  4. **Level 3 (Audit Key Lock):**
+     ```sql
+     SELECT key_bytes, status FROM AuditSigningKey WHERE key_id = p_signing_key_id FOR SHARE;
+     ```
+     - Assert `status = 'ACTIVE'`.
+  5. **Level 4 (Nonce Registry Mutation):**
+     ```sql
+     INSERT INTO NonceRegistry (nonce, scope, target_id, request_digest, consumed_at, created_at)
+     VALUES (
+         p_nonce, 'cart_refund', p_cart_id,
+         extensions.digest(p_cart_id::text || ':' || v_authoritative_refund_id || ':' || v_refund_amount_cents::text, 'sha256'),
+         clock_timestamp(), clock_timestamp()
+     );
+     ```
+  6. **Level 5 (State Mutation & Evidence Append):**
+     ```sql
+     INSERT INTO RefundEvidenceRecord (
+         cart_id, capture_id, transmission_id, authenticated_refund_id, refund_amount_cents,
+         currency, reason, internal_audit_signature, recorded_at
+     ) VALUES (
+         p_cart_id, p_capture_id, p_transmission_id, v_authoritative_refund_id, v_refund_amount_cents,
+         v_tx_currency, p_reason,
+         extensions.hmac(convert_to(p_cart_id::text || ':' || p_capture_id || ':' || v_authoritative_refund_id || ':' || v_refund_amount_cents::text, 'UTF8'), v_key_bytes, 'sha256'),
+         clock_timestamp()
+     ) RETURNING id INTO v_refund_id;
+
+     v_target_status := CASE WHEN v_new_refunded_cents = v_cart_total THEN 'REFUNDED' ELSE 'PARTIALLY_REFUNDED' END;
+     UPDATE ApprovedMerchantCart
+        SET checkoutStatus = v_target_status,
+            cumulativeRefundedCents = v_new_refunded_cents,
+            updatedAt = clock_timestamp()
+      WHERE id = p_cart_id;
+     ```
+- **Output:** Returns record `(refund_evidence_id UUID, cart_id UUID, cumulative_refunded_cents BIGINT, status VARCHAR(32), recorded_at TIMESTAMPTZ)`.
+
+---
+

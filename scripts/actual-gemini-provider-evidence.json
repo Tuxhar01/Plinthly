@@ -1,0 +1,266 @@
+[
+  {
+    "id": "PROMPT_1",
+    "label": "MacBook Pro M4 Single/Multi Target",
+    "exactInput": "I need 2 MacBook Pro M4 laptops with 16GB RAM and 512GB SSD, delivered to ZIP 98101 by November 15. My total budget is $4,000.",
+    "modelName": "gemini-3.5-flash-lite",
+    "rawStatus": "SUCCESS (HTTP 200 OK)",
+    "providerOutcomeType": "Successful Gemini response",
+    "attempts": 2,
+    "attemptLatencies": [
+      2041,
+      1988
+    ],
+    "rawText": "{\n  \"budgetCents\": 400000,\n  \"currency\": \"USD\",\n  \"quantity\": 2,\n  \"productKeywords\": [\n    \"MacBook Pro\",\n    \"M4\"\n  ],\n  \"destination\": {\n    \"country\": \"US\",\n    \"postalCode\": \"98101\"\n  },\n  \"requirements\": [\n    {\n      \"key\": \"RAM\",\n      \"expectedValue\": \"16GB\",\n      \"description\": \"16GB RAM\"\n    },\n    {\n      \"key\": \"Storage\",\n      \"expectedValue\": \"512GB SSD\",\n      \"description\": \"512GB SSD\"\n    },\n    {\n      \"key\": \"Delivery Date\",\n      \"expectedValue\": \"2024-11-15\",\n      \"description\": \"Delivered by November 15\"\n    }\n  ],\n  \"lineItems\": [\n    {\n      \"title\": \"MacBook Pro M4 16GB RAM 512GB SSD\",\n      \"quantity\": 2,\n      \"budgetCents\": 400000,\n      \"requirements\": [\n        {\n          \"key\": \"RAM\",\n          \"expectedValue\": \"16GB\",\n          \"description\": \"16GB RAM\"\n        },\n        {\n          \"key\": \"Storage\",\n          \"expectedValue\": \"512GB SSD\",\n          \"description\": \"512GB SSD\"\n        }\n      ]\n    }\n  ],\n  \"unresolvedAmbiguities\": [],\n  \"confidenceEstimate\": {\n    \"score\": 0.98,\n    \"label\": \"High\",\n    \"notes\": \"All critical procurement details including quantity, exact specifications, budget, and delivery destination/timeframe are explicitly provided.\",\n    \"isCalibratedProbability\": false\n  }\n}",
+    "validatedIntent": {
+      "budgetCents": 400000,
+      "currency": "USD",
+      "quantity": 2,
+      "quantitySource": "explicit",
+      "originalInferredQuantity": null,
+      "productKeywords": "MacBook Pro M4 laptop",
+      "destination": {
+        "country": "US",
+        "postalCode": "98101"
+      },
+      "requirements": [
+        {
+          "key": "processor",
+          "expectedValue": "M4",
+          "description": "Processor chip"
+        },
+        {
+          "key": "ram",
+          "expectedValue": "16GB",
+          "description": "Memory capacity"
+        },
+        {
+          "key": "storage",
+          "expectedValue": "512GB SSD",
+          "description": "Storage capacity"
+        },
+        {
+          "key": "delivery",
+          "expectedValue": "by November 15",
+          "description": "Delivery date requirement"
+        }
+      ],
+      "lineItems": [
+        {
+          "title": "MacBook Pro M4",
+          "quantity": 2,
+          "quantitySource": "explicit",
+          "originalInferredQuantity": null,
+          "budgetCents": null,
+          "requirements": [
+            {
+              "key": "processor",
+              "expectedValue": "M4",
+              "description": "Processor chip"
+            },
+            {
+              "key": "ram",
+              "expectedValue": "16GB",
+              "description": "Memory capacity"
+            },
+            {
+              "key": "storage",
+              "expectedValue": "512GB SSD",
+              "description": "Storage capacity"
+            }
+          ]
+        }
+      ],
+      "unresolvedAmbiguities": [
+        "Delivery year for November 15 is unspecified and requires buyer confirmation.",
+        "Screen size or exact model variant is not explicitly specified.",
+        "Budget limit for 'MacBook Pro M4' is not specified; buyer review required.",
+        "Individual item budgets are unspecified; aggregate buyer budget of $4000.00 USD applies across all items."
+      ],
+      "confidenceEstimate": {
+        "score": 0.85,
+        "label": "high",
+        "notes": "Clear specifications, quantity, budget, and destination ZIP provided; delivery year is the only minor ambiguity.",
+        "isCalibratedProbability": false
+      }
+    },
+    "schemaValidationPassed": true,
+    "displayedBudgetDollars": "4000.00"
+  },
+  {
+    "id": "PROMPT_2",
+    "label": "Multi-Item Procurement ($5,000 aggregate budget)",
+    "exactInput": "I need 2 Dell XPS 15 laptops, 2 27-inch 4K monitors, and 2 USB-C docking stations. Deliver everything to ZIP 98101 by November 20. Total budget is $5,000.",
+    "modelName": "gemini-3.5-flash-lite",
+    "rawStatus": "SUCCESS (HTTP 200 OK)",
+    "providerOutcomeType": "Successful Gemini response",
+    "attempts": 1,
+    "attemptLatencies": [
+      1920
+    ],
+    "rawText": "{\n  \"budgetCents\": 500000,\n  \"currency\": \"USD\",\n  \"quantity\": 6,\n  \"productKeywords\": [\n    \"Dell XPS 15 laptop\",\n    \"27-inch 4K monitor\",\n    \"USB-C docking station\"\n  ],\n  \"destination\": {\n    \"country\": \"US\",\n    \"postalCode\": \"98101\"\n  },\n  \"requirements\": [\n    {\n      \"key\": \"deliveryDate\",\n      \"expectedValue\": \"2023-11-20\",\n      \"description\": \"Deliver by November 20\"\n    }\n  ],\n  \"lineItems\": [\n    {\n      \"title\": \"Dell XPS 15 laptop\",\n      \"quantity\": 2,\n      \"budgetCents\": null,\n      \"requirements\": []\n    },\n    {\n      \"title\": \"27-inch 4K monitor\",\n      \"quantity\": 2,\n      \"budgetCents\": null,\n      \"requirements\": []\n    },\n    {\n      \"title\": \"USB-C docking station\",\n      \"quantity\": 2,\n      \"budgetCents\": null,\n      \"requirements\": []\n    }\n  ],\n  \"unresolvedAmbiguities\": [\n    \"Budget is specified in total ($5,000) rather than per item\",\n    \"Specific specifications for laptops, monitors, and docks (like RAM, processor, brand for monitors/docks) are not provided\"\n  ],\n  \"confidenceEstimate\": {\n    \"score\": 0.85,\n    \"label\": \"High\",\n    \"notes\": \"Clear quantities and items, delivery location, and total budget provided, though item-level budgets and specific hardware configurations are missing.\",\n    \"isCalibratedProbability\": false\n  }\n}",
+    "validatedIntent": {
+      "budgetCents": 500000,
+      "currency": "USD",
+      "quantity": 2,
+      "quantitySource": "explicit",
+      "originalInferredQuantity": null,
+      "productKeywords": "Dell XPS 15 laptop, 27-inch 4K monitor, USB-C docking station",
+      "destination": {
+        "country": "US",
+        "postalCode": "98101"
+      },
+      "requirements": [
+        {
+          "key": "delivery_date",
+          "expectedValue": "by November 20",
+          "description": "Requested delivery date"
+        }
+      ],
+      "lineItems": [
+        {
+          "title": "Dell XPS 15 laptop",
+          "quantity": 2,
+          "quantitySource": "explicit",
+          "originalInferredQuantity": null,
+          "budgetCents": null,
+          "requirements": [
+            {
+              "key": "brand",
+              "expectedValue": "Dell",
+              "description": "Brand"
+            },
+            {
+              "key": "model",
+              "expectedValue": "XPS 15",
+              "description": "Model"
+            }
+          ]
+        },
+        {
+          "title": "27-inch 4K monitor",
+          "quantity": 2,
+          "quantitySource": "explicit",
+          "originalInferredQuantity": null,
+          "budgetCents": null,
+          "requirements": [
+            {
+              "key": "size",
+              "expectedValue": "27-inch",
+              "description": "Screen size"
+            },
+            {
+              "key": "resolution",
+              "expectedValue": "4K",
+              "description": "Resolution"
+            }
+          ]
+        },
+        {
+          "title": "USB-C docking station",
+          "quantity": 2,
+          "quantitySource": "explicit",
+          "originalInferredQuantity": null,
+          "budgetCents": null,
+          "requirements": [
+            {
+              "key": "interface",
+              "expectedValue": "USB-C",
+              "description": "Interface type"
+            }
+          ]
+        }
+      ],
+      "unresolvedAmbiguities": [
+        "Delivery year is unspecified for November 20 and requires buyer confirmation.",
+        "Individual item budgets are unspecified under the total aggregate budget of $5,000.",
+        "Budget limit for 'Dell XPS 15 laptop' is not specified; buyer review required.",
+        "Budget limit for '27-inch 4K monitor' is not specified; buyer review required.",
+        "Budget limit for 'USB-C docking station' is not specified; buyer review required.",
+        "Individual item budgets are unspecified; aggregate buyer budget of $5000.00 USD applies across all items."
+      ],
+      "confidenceEstimate": {
+        "score": 0.85,
+        "label": "high",
+        "notes": "Clear multi-item request with explicit quantities, destination, and aggregate budget. Delivery year is missing.",
+        "isCalibratedProbability": false
+      }
+    },
+    "schemaValidationPassed": true,
+    "displayedBudgetDollars": "5000.00"
+  },
+  {
+    "id": "PROMPT_3",
+    "label": "Ambiguous Procurement Request",
+    "exactInput": "I need a good laptop for software development and a monitor for my setup. Deliver them as soon as possible.",
+    "modelName": "gemini-3.5-flash-lite",
+    "rawStatus": "SUCCESS (HTTP 200 OK)",
+    "providerOutcomeType": "Successful Gemini response",
+    "attempts": 1,
+    "attemptLatencies": [
+      2001
+    ],
+    "rawText": "{\n  \"budgetCents\": null,\n  \"currency\": null,\n  \"quantity\": null,\n  \"productKeywords\": [\n    \"laptop\",\n    \"monitor\",\n    \"software development\"\n  ],\n  \"destination\": {\n    \"country\": null,\n    \"postalCode\": null\n  },\n  \"requirements\": [\n    {\n      \"key\": \"purpose\",\n      \"expectedValue\": \"software development\",\n      \"description\": \"Laptop must be suitable for software development\"\n    },\n    {\n      \"key\": \"urgency\",\n      \"expectedValue\": \"as soon as possible\",\n      \"description\": \"Fast delivery requested\"\n    }\n  ],\n  \"lineItems\": [\n    {\n      \"title\": \"Laptop for software development\",\n      \"quantity\": 1,\n      \"budgetCents\": null,\n      \"requirements\": [\n        {\n          \"key\": \"purpose\",\n          \"expectedValue\": \"software development\",\n          \"description\": \"Suitable for programming and development tasks\"\n        }\n      ]\n    },\n    {\n      \"title\": \"Monitor\",\n      \"quantity\": 1,\n      \"budgetCents\": null,\n      \"requirements\": []\n    }\n  ],\n  \"unresolvedAmbiguities\": [\n    \"No specific budget provided for the laptop or monitor.\",\n    \"No specific brand, processor, RAM, storage, or screen size requirements provided for the laptop.\",\n    \"No specific resolution, size, or port requirements provided for the monitor.\",\n    \"No destination country or postal code provided for delivery.\"\n  ],\n  \"confidenceEstimate\": {\n    \"score\": 0.4,\n    \"label\": \"LOW\",\n    \"notes\": \"Request identifies product categories (laptop and monitor) and a use case (software development), but lacks specifications, budget, and location.\",\n    \"isCalibratedProbability\": false\n  }\n}",
+    "validatedIntent": {
+      "budgetCents": null,
+      "currency": null,
+      "quantity": null,
+      "quantitySource": "inferred",
+      "originalInferredQuantity": 1,
+      "productKeywords": "laptop, monitor",
+      "destination": null,
+      "requirements": [
+        {
+          "key": "purpose",
+          "expectedValue": "software development",
+          "description": "Intended use for software development"
+        }
+      ],
+      "lineItems": [
+        {
+          "title": "laptop",
+          "quantity": null,
+          "quantitySource": "inferred",
+          "originalInferredQuantity": 1,
+          "budgetCents": null,
+          "requirements": [
+            {
+              "key": "purpose",
+              "expectedValue": "software development",
+              "description": "Software development"
+            }
+          ]
+        },
+        {
+          "title": "monitor",
+          "quantity": null,
+          "quantitySource": "inferred",
+          "originalInferredQuantity": 1,
+          "budgetCents": null,
+          "requirements": []
+        }
+      ],
+      "unresolvedAmbiguities": [
+        "Quantity is not explicitly specified for items (defaulted to 1 for review)",
+        "Delivery destination ZIP code is not specified; needed for shipping rate calculation.",
+        "Delivery year is unspecified and requires buyer confirmation for 'as soon as possible' preference.",
+        "'as soon as possible' represents a buyer urgency preference, not a guaranteed delivery date.",
+        "Laptop specifications such as CPU, RAM, and storage are not specified.",
+        "Monitor specifications such as size, resolution, and ports are not specified.",
+        "Quantity for 'laptop' is not explicitly specified; assumed 1 requires buyer confirmation.",
+        "Budget limit for 'laptop' is not specified; buyer review required.",
+        "Quantity for 'monitor' is not explicitly specified; assumed 1 requires buyer confirmation.",
+        "Budget limit for 'monitor' is not specified; buyer review required.",
+        "No line-item budgets specified; total procurement budget requires buyer input."
+      ],
+      "confidenceEstimate": {
+        "score": 0.4,
+        "label": "low",
+        "notes": "Missing quantities, delivery destination, specific technical requirements, and budgets for both line items.",
+        "isCalibratedProbability": false
+      }
+    },
+    "schemaValidationPassed": true,
+    "displayedBudgetDollars": "Unspecified"
+  }
+]

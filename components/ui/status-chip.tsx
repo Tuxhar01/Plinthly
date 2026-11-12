@@ -39,7 +39,7 @@ export function StatusChip({
         borderRadius: "var(--radius-control)",
         ...style,
       }}
-      className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium select-none ${className}`.trim()}
+      className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium select-none transition-colors duration-200 ${className}`.trim()}
       {...props}
     >
       {icon && <span aria-hidden="true" className="shrink-0">{icon}</span>}

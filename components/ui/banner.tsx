@@ -50,7 +50,7 @@ export function Banner({
         padding: "calc(var(--space-unit) * 3)", // 12px
         ...style,
       }}
-      className={`text-sm ${className}`.trim()}
+      className={`text-sm animate-slide-down-fade transition-all duration-200 ${className}`.trim()}
       {...props}
     >
       {children}

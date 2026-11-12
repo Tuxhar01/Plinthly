@@ -11,7 +11,7 @@
  * 7. Stale or invalidated approvals cannot reach PayPal order creation.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { PayPalSandboxClient } from "../../lib/paypal/client";
 import { PayPalApiError } from "../../lib/paypal/types";
 import { PurchaseWorkflowService } from "../../lib/workflow/service";
@@ -20,6 +20,11 @@ import { Actor } from "../../lib/state/types";
 import { createPayPalOrderSchema } from "../../lib/workflow/validation";
 import { DestinationContext } from "../../lib/discovery/shipping";
 import { ApprovalIntegrityError } from "../../lib/workflow/errors";
+import {
+  setNonProductionTestTaxFixture,
+  clearNonProductionTestTaxFixture,
+  createDefensibleTestTaxQuote,
+} from "../../lib/discovery/cart/strategy-engine";
 
 describe("Phase 16.2 — PayPal Intent Consistency and Non-Capture Safety", () => {
   const destination: DestinationContext = {
@@ -32,6 +37,14 @@ describe("Phase 16.2 — PayPal Intent Consistency and Non-Capture Safety", () =
     kind: "user",
     userId: "usr_buyer_p16_2",
   };
+
+  beforeEach(() => {
+    setNonProductionTestTaxFixture((dest) => createDefensibleTestTaxQuote({ destination: dest }));
+  });
+
+  afterEach(() => {
+    clearNonProductionTestTaxFixture();
+  });
 
   describe("1. Outgoing PayPal Order Intent Verification", () => {
     it("PayPalSandboxClient.createOrder explicitly sends intent: 'AUTHORIZE' in payload", async () => {

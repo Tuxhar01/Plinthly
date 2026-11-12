@@ -19,6 +19,145 @@ export type VerificationLevel = "strict" | "standard" | "flexible";
 export type QuantityProvenanceSource = "explicit" | "inferred" | "unresolved" | "manual_override" | "legacy_direct";
 
 /**
+ * Verifiable evidence integrity classification:
+ * - "verified_fact": Independently verified via cryptographic proof, authoritative quote, or statutory rule.
+ * - "merchant_claim": Published merchant or seller policy assertion without carrier/first-party binding.
+ * - "estimate": Heuristic or statistical approximation; never authoritative for buyer approval.
+ * - "unknown": Missing or unresolved evidence.
+ */
+export type EvidenceTier = "verified_fact" | "merchant_claim" | "estimate" | "unknown";
+
+/**
+ * Deterministic product suitability classification for professional procurement requests:
+ * - "compatible": Candidate meets verified modern baseline specifications for the stated purpose.
+ * - "compatible_with_limitations": Candidate meets functional thresholds but carries disclosed limitations (e.g. 8GB RAM, refurbished).
+ * - "insufficient_evidence": Provider data lacks critical technical evidence (missing CPU gen or RAM).
+ * - "unsuitable": Product is objectively unsuitable (e.g. obsolete 10-year-old hardware, Windows 11 incompatible, <=4GB RAM).
+ */
+export type ProductSuitabilityTier =
+  | "compatible"
+  | "compatible_with_limitations"
+  | "insufficient_evidence"
+  | "unsuitable";
+
+export interface ProductSuitabilityAssessment {
+  readonly tier: ProductSuitabilityTier;
+  readonly isProfessionalDevelopmentRequest: boolean;
+  readonly isVintageOrBudgetExplicitlyRequested: boolean;
+  readonly disclosures: readonly string[];
+  readonly detectedSpecs: {
+    readonly cpuGeneration?: string;
+    readonly ramGb?: number;
+    readonly storage?: string;
+    readonly isRefurbishedOrUsed?: boolean;
+    readonly isWindows11Capable?: boolean;
+    readonly isObsoleteHardware?: boolean;
+  };
+  readonly reason: string;
+}
+
+/**
+ * Orthogonal seller authenticity and warranty evidence claims.
+ * Enforces that direct first-party retailer fulfillment does NOT independently imply
+ * brand authorization, product authenticity verification, or manufacturer warranty coverage.
+ */
+export interface SellerAuthenticityEvidence {
+  readonly sellerName: string;
+  readonly isDirectRetailerSeller: boolean;
+  readonly isMarketplace: boolean;
+  readonly isManufacturerAuthorized: boolean;
+  readonly authorizationEvidence?: string | null;
+  readonly isProductAuthenticVerified: boolean;
+  readonly authenticityEvidence?: string | null;
+  readonly warrantyCoverage: "full_manufacturer" | "limited_merchant" | "unverified" | "none";
+  readonly warrantyEvidence?: string | null;
+  readonly evidenceTier: EvidenceTier;
+}
+
+/**
+ * Destination-specific tax evidence.
+ * Tracks statutory general sales-tax absence jurisdictions (e.g. OR, NH, DE), authoritative quotes,
+ * or identifies missing municipal/resort tax quotes (e.g. Alaska local sales tax, Montana local resort sales tax).
+ */
+export interface TaxEvidence {
+  readonly jurisdictionState?: string;
+  readonly amountCents: number | null;
+  readonly status: "quoted" | "statutory_absence" | "statutory_zero" | "unknown" | "missing" | "untrusted";
+  readonly evidenceReference?: string | null;
+  readonly explanation: string;
+  readonly sourceIdentity?: string;
+  readonly quotedAt?: string;
+  readonly expiresAt?: string;
+  readonly postalCode?: string;
+  readonly currency?: string;
+  readonly quoteSignature?: string | null;
+  readonly quoteId?: string;
+}
+
+/**
+ * Defensible landed cost breakdown isolating each cost component and its defensibility.
+ */
+export interface StrategyCostBreakdown {
+  readonly merchandiseSubtotalCents: number;
+  readonly shippingCents: number | null;
+  readonly discountCents: number;
+  readonly taxCents: number | null;
+  readonly totalLandedCostCents: number | null;
+  readonly currency: Currency;
+  readonly isMerchandiseDefensible: boolean;
+  readonly isShippingDefensible: boolean;
+  readonly isTaxDefensible: boolean;
+  readonly isDiscountDefensible: boolean;
+  readonly isLandedCostDefensible: boolean;
+  readonly missingComponents: readonly string[];
+  readonly discountEvidenceReference?: string | null;
+}
+
+/**
+ * Structured trade-off analysis across cost, quality, compatibility, availability, and delivery.
+ * Every trade-off is bound to a verifiable evidence tier and reference.
+ */
+export interface StrategyTradeOffs {
+  readonly cost: {
+    readonly description: string;
+    readonly evidenceTier: EvidenceTier;
+    readonly evidenceReference?: string;
+  };
+  readonly quality: {
+    readonly description: string;
+    readonly evidenceTier: EvidenceTier;
+    readonly evidenceReference?: string;
+  };
+  readonly compatibility: {
+    readonly description: string;
+    readonly matchRatio: number;
+    readonly contradictoryCount: number;
+    readonly evidenceTier: EvidenceTier;
+  };
+  readonly availability: {
+    readonly description: string;
+    readonly allInStock: boolean;
+    readonly evidenceTier: EvidenceTier;
+  };
+  readonly delivery: {
+    readonly description: string;
+    readonly shipmentCount: number;
+    readonly isQuoteBound: boolean;
+    readonly deliveryDate: string | null;
+    readonly evidenceTier: EvidenceTier;
+  };
+}
+
+/**
+ * 4-tier strategy ranking classification:
+ * - 1: Feasible-Complete (feasible + defensible complete landed cost)
+ * - 2: Feasible-Incomplete (feasible + missing/unverified cost component)
+ * - 3: Uncertain (unresolved shipping/availability/eligibility)
+ * - 4: Blocked (unfulfilled line items or critical contradiction)
+ */
+export type StrategyTier = 1 | 2 | 3 | 4;
+
+/**
  * A discrete buyer requirement for a specific product and quantity in a multi-item purchase.
  */
 export interface ProcurementLineItem {
@@ -61,6 +200,12 @@ export interface LineItemCandidateAllocation {
   readonly rawAttributes?: Record<string, unknown>;
   readonly snapshotHash: string;
   readonly capturedAt: string;
+  readonly authenticity?: SellerAuthenticityEvidence;
+  readonly matchedSpecs?: readonly string[];
+  readonly contradictorySpecs?: readonly string[];
+  readonly missingSpecs?: readonly string[];
+  readonly observationList?: readonly Record<string, unknown>[];
+  readonly suitability?: ProductSuitabilityAssessment;
 }
 
 /**
@@ -152,6 +297,9 @@ export interface PlannedShipment {
   readonly carrier?: string | null;
   readonly trackingAvailable: boolean;
   readonly explanation: string;
+  readonly quoteId?: string | null;
+  readonly quoteReference?: string | null;
+  readonly quoteExpiresAt?: string | null;
 }
 
 /**
@@ -203,6 +351,27 @@ export interface ProcurementStrategy {
   readonly shippingEvidenceType: "quoted" | "policy_derived" | "mixed" | "unverified";
   /** Whether all shipping costs are backed by retailer-issued quotes (false if policy-derived or unquoted) */
   readonly isQuoteBacked: boolean;
+  /** Detailed defensible cost breakdown */
+  readonly costBreakdown?: StrategyCostBreakdown;
+  /** Structured verifiable trade-offs across cost, quality, compatibility, availability, and delivery */
+  readonly tradeOffs?: StrategyTradeOffs;
+  /** Cryptographic evidence-content fingerprint (independent of evaluatedAt timestamp) */
+  readonly evidenceFingerprint?: string;
+  /** Explicit 1-4 ranking tier */
+  readonly tier?: StrategyTier;
+}
+
+/**
+ * Append-only invalidation record for buyer approval snapshots.
+ * Preserves the original approval record and audit history intact.
+ */
+export interface ApprovalInvalidationRecord {
+  readonly id: string;
+  readonly approvalId: string;
+  readonly reason: string;
+  readonly evidenceReference: string;
+  readonly timestamp: string;
+  readonly sourceActorId: string;
 }
 
 /**

@@ -92,7 +92,7 @@ describe.skipIf(!hasApiKey)("Live Gemini Smoke Tests (Explicit Live Provider Ver
 
       // 6. Confidence estimate is model heuristic, not calibrated probability
       expect(result.confidenceEstimate.isCalibratedProbability).toBe(false);
-    }, 20000);
+    }, 40000);
 
     it("Live Prompt B: decomposes 'I need a laptop.' without inventing budget or quantity", async () => {
       await new Promise((r) => setTimeout(r, 1500));
@@ -132,6 +132,6 @@ describe.skipIf(!hasApiKey)("Live Gemini Smoke Tests (Explicit Live Provider Ver
 
       // 6. Confidence estimate is model heuristic, not calibrated probability
       expect(result.confidenceEstimate.isCalibratedProbability).toBe(false);
-    }, 20000);
+    }, 40000);
   });
 });

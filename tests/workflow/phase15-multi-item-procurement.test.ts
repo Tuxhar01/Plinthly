@@ -11,7 +11,7 @@
  * 7. PayPal Sandbox safety: zero PayPal calls when unapproved/invalid, multi-merchant transaction boundary enforcement, zero funds captured.
  */
 
-import { describe, it, expect, vi, beforeEach, beforeAll } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
 import {
   validateProcurementLineItems,
   convertLegacyRequirementsToLineItems,
@@ -27,6 +27,9 @@ import { planCartShipments } from "../../lib/discovery/cart/split-shipment";
 import {
   buildStrategyFromAllocations,
   generateProcurementStrategies,
+  setNonProductionTestTaxFixture,
+  clearNonProductionTestTaxFixture,
+  createDefensibleTestTaxQuote,
 } from "../../lib/discovery/cart/strategy-engine";
 import {
   createMultiItemApprovalSnapshot,
@@ -34,6 +37,7 @@ import {
 } from "../../lib/discovery/cart/approval-snapshot";
 import {
   ProcurementLineItem,
+  ProcurementStrategy,
   CartItem,
 } from "../../lib/discovery/cart/types";
 import { NormalizedProductCandidate } from "../../lib/discovery/types";
@@ -49,6 +53,11 @@ import { computeDraftHash, signQuantityConfirmation } from "../../lib/workflow/q
 
 beforeAll(() => {
   process.env.CONFIRMATION_SIGNING_SECRET = "plinthly_test_secret_32_characters_long_minimum!!";
+  setNonProductionTestTaxFixture((dest) => createDefensibleTestTaxQuote({ destination: dest }));
+});
+
+afterAll(() => {
+  clearNonProductionTestTaxFixture();
 });
 
 describe("PLINTHLY — PHASE 15: Multi-Item Procurement, Cart Aggregation & Split-Shipment Planning", () => {
@@ -59,6 +68,14 @@ describe("PLINTHLY — PHASE 15: Multi-Item Procurement, Cart Aggregation & Spli
   };
 
   const humanBuyer: Actor = { kind: "user", userId: "usr_multi_buyer_1" };
+
+  beforeEach(() => {
+    setNonProductionTestTaxFixture((dest) => createDefensibleTestTaxQuote({ destination: dest }));
+  });
+
+  afterEach(() => {
+    clearNonProductionTestTaxFixture();
+  });
 
   describe("1. Multi-Item Buyer Requirements and Validation", () => {
     it("1.1 validates multiple line items with distinct IDs, quantities, specifications, and budgets", () => {
@@ -840,14 +857,18 @@ describe("PLINTHLY — PHASE 15: Multi-Item Procurement, Cart Aggregation & Spli
       capturedAt: new Date().toISOString(),
     };
 
-    const strategy = buildStrategyFromAllocations(
-      "strat_1",
-      "Test Strat",
-      "Desc",
-      [testAllocation],
-      [testLineItem],
-      defaultDestination
-    );
+    let strategy: ProcurementStrategy;
+
+    beforeEach(() => {
+      strategy = buildStrategyFromAllocations(
+        "strat_1",
+        "Test Strat",
+        "Desc",
+        [testAllocation],
+        [testLineItem],
+        defaultDestination
+      );
+    });
 
     it("6.1 creates cryptographic MultiItemApprovalSnapshot bound to line items, allocations, and carts", () => {
       const snapshot = createMultiItemApprovalSnapshot({

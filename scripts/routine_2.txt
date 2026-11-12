@@ -1,0 +1,25 @@
+#### Routine `R2-ROUTINE-02`: `prepare_merchant_cart_capture`
+- **Canonical SQL Name:** `prepare_merchant_cart_capture`
+- **Responsibility:** Atomically transitions an approved merchant cart from `BUYER_APPROVED` to `CAPTURING` under an exclusive row lock, preventing concurrent double-capture attempts.
+- **Trust Boundary:** Invoked by Checkout Orchestrator (`app_orchestrator_role`). Executed via `SECURITY DEFINER` owned by `plinthly_security_admin` with fixed `SET search_path = extensions, pg_catalog;`.
+- **Parameters (5):** `p_cart_id UUID, p_approval_aggregate_id UUID, p_expected_amount_cents BIGINT, p_expected_currency VARCHAR(3), p_idempotency_key VARCHAR(128)`.
+- **Validation Constraints:** Non-null enforcement; `1 <= p_expected_amount_cents <= 999999999`; `p_expected_currency = 'USD'`.
+- **Exact Lock Sequence (Strict Level 0 $\rightarrow$ 5):**
+  1. **Level 0 (Advisory Mutex):** `PERFORM pg_advisory_xact_lock(hashtext('cart_checkout:' || p_cart_id::text));`
+  2. **Level 1 (Domain Records):**
+     ```sql
+     SELECT id, status FROM ApprovalAggregate WHERE id = p_approval_aggregate_id FOR SHARE;
+     ```
+     - Assert `status = 'ACTIVE'`.
+     ```sql
+     SELECT id, checkoutStatus, totalCartCents FROM ApprovedMerchantCart WHERE id = p_cart_id FOR UPDATE;
+     ```
+     - Verify `checkoutStatus = 'BUYER_APPROVED'` and `totalCartCents = p_expected_amount_cents`.
+  3. **Level 5 (State Mutation):**
+     ```sql
+     UPDATE ApprovedMerchantCart SET checkoutStatus = 'CAPTURING', lockedAt = clock_timestamp() WHERE id = p_cart_id;
+     ```
+- **Output:** Returns record `(cart_id UUID, status VARCHAR(32), locked_at TIMESTAMPTZ)`.
+
+---
+

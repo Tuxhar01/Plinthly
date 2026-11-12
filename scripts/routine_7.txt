@@ -1,0 +1,26 @@
+#### Routine `R2-ROUTINE-07`: `revoke_audit_signing_key`
+- **Canonical SQL Name:** `revoke_audit_signing_key`
+- **Responsibility:** Atomically transitions an `AuditSigningKey` from `ACTIVE` to `REVOKED`. Enforces safe idempotency and nonce ordering.
+- **Trust Boundary:** Administrative Console (`security_admin_user`) under role `admin_security_role`. Executed via `SECURITY DEFINER` owned by `plinthly_security_admin` with fixed `SET search_path = extensions, pg_catalog;`.
+- **Parameters (4):** `p_key_id VARCHAR(64), p_revocation_reason TEXT, p_revoked_by VARCHAR(64), p_nonce VARCHAR(64)`.
+- **Exact Lock Sequence (Strict Monotonic Level 0 $\rightarrow$ 5):**
+  1. **Level 0 (Advisory Mutex):** `PERFORM pg_advisory_xact_lock(hashtext('key_revocation:' || p_key_id));`
+  2. **Level 3 (Target Key Row Lock):**
+     ```sql
+     SELECT status, revoked_at, revocation_reason FROM AuditSigningKey WHERE key_id = p_key_id FOR UPDATE;
+     ```
+     - If key not found: Raise SQLSTATE `P0002` (`ERR_KEY_NOT_FOUND`).
+     - Idempotent Retry Check: If `status = 'REVOKED'`, query `NonceRegistry` under scope `'key_revocation'`. If digest matches, return cached revocation record. Else raise SQLSTATE `55000` (`ERR_RESOURCE_ALREADY_REVOKED`).
+  3. **Level 4 (Nonce Registry Mutation):**
+     ```sql
+     INSERT INTO NonceRegistry (nonce, scope, target_id, request_digest, consumed_at, created_at)
+     VALUES (p_nonce, 'key_revocation', p_key_id, extensions.digest(p_revocation_reason, 'sha256'), clock_timestamp(), clock_timestamp());
+     ```
+  4. **Level 5 (State Mutation):**
+     ```sql
+     UPDATE AuditSigningKey SET status = 'REVOKED', revoked_at = clock_timestamp(), revocation_reason = p_revocation_reason, revoked_by = p_revoked_by WHERE key_id = p_key_id;
+     ```
+- **Output:** Returns record `(key_id VARCHAR(64), revoked_at TIMESTAMPTZ, status VARCHAR(16), idempotent_retry BOOLEAN)`.
+
+---
+

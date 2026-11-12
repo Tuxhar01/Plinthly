@@ -1,0 +1,39 @@
+#### Routine `R2-ROUTINE-03`: `record_webhook_transmission_ingress` (C-03, C-13, C-19, C-25, C-26, C-30, C-33, C-34, C-41)
+- **Canonical SQL Name:** `record_webhook_transmission_ingress`
+- **Responsibility:** Persists raw PayPal webhook wire bytes and parsed claims under mutual exclusion. Sourced exclusively from authenticated webhook ingress worker (`webhook_ingress_role`).
+- **Trust Boundary:** Executed exclusively by `webhook_ingress_role`. Executed via `SECURITY DEFINER` owned by `plinthly_security_admin` with fixed `SET search_path = extensions, pg_catalog;`.
+- **Parameters (8):** `p_transmission_id VARCHAR(64), p_authenticated_event_type VARCHAR(64), p_authenticated_order_id VARCHAR(64), p_authenticated_capture_id VARCHAR(64), p_authenticated_refund_id VARCHAR(64), p_authenticated_amount_cents BIGINT, p_authenticated_currency VARCHAR(3), p_authenticated_payee_email VARCHAR(255), p_raw_payload BYTEA, p_signing_key_id VARCHAR(64), p_nonce VARCHAR(64)`.
+- **Exact Lock Sequence (Strict Monotonic Level 0 $\rightarrow$ 5 — Reconciled C-41):**
+  1. **Level 0 (Advisory Mutex):** `PERFORM pg_advisory_xact_lock(hashtext('transmission:' || p_transmission_id));`
+  2. **Level 3 (Config Row Lock):**
+     ```sql
+     SELECT key_bytes, status FROM AuditSigningKey WHERE key_id = p_signing_key_id FOR SHARE;
+     ```
+     - Assert `status = 'ACTIVE'`.
+  3. **Level 4 (Nonce Registry Mutation):**
+     ```sql
+     INSERT INTO NonceRegistry (nonce, scope, target_id, request_digest, consumed_at, created_at)
+     VALUES (
+         p_nonce, 'webhook_ingress', extensions.digest(p_transmission_id, 'sha256'),
+         extensions.digest(p_transmission_id || ':' || p_authenticated_event_type, 'sha256'),
+         clock_timestamp(), clock_timestamp()
+     );
+     ```
+  4. **Level 5 (Append Wire Log):**
+     ```sql
+     INSERT INTO WebhookTransmission (
+         transmission_id, authenticated_event_type, authenticated_order_id,
+         authenticated_capture_id, authenticated_refund_id, authenticated_amount_cents,
+         authenticated_currency, authenticated_payee_email, raw_payload, payload_hash,
+         status, response_code, created_at
+     ) VALUES (
+         p_transmission_id, p_authenticated_event_type, p_authenticated_order_id,
+         p_authenticated_capture_id, p_authenticated_refund_id, p_authenticated_amount_cents,
+         p_authenticated_currency, p_authenticated_payee_email, p_raw_payload,
+         extensions.digest(p_raw_payload, 'sha256'), 'RECORDED', 200, clock_timestamp()
+     );
+     ```
+- **Output:** Returns record `(transmission_id VARCHAR(64), status VARCHAR(32), created_at TIMESTAMPTZ)`.
+
+---
+

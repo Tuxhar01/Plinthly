@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
-import { createMultiItemPlanSchema } from "@/lib/workflow/validation";
-import { getPurchaseWorkflowService } from "@/lib/workflow/service";
-import { CreateMultiItemPlanRequest } from "@/lib/workflow/types";
+import { createMultiItemPlanSchema } from "../../../../../../lib/workflow/validation";
+import { getPurchaseWorkflowService } from "../../../../../../lib/workflow/service";
+import { CreateMultiItemPlanRequest } from "../../../../../../lib/workflow/types";
 import {
   handleApiError,
   parseJsonBody,
   resolveRouteParams,
   requireActor,
-} from "@/lib/workflow/api-helpers";
+} from "../../../../../../lib/workflow/api-helpers";
 
 interface RouteParams {
   id: string;
@@ -40,7 +40,32 @@ export async function POST(
       return jsonResult.response;
     }
 
-    const validatedInput = createMultiItemPlanSchema.parse(jsonResult.data);
+    const parseResult = createMultiItemPlanSchema.safeParse(jsonResult.data);
+    if (!parseResult.success) {
+      console.warn("[MULTI_ITEM_PLAN_VALIDATION_FAILURE]", {
+        purchaseId: id,
+        issues: parseResult.error.issues.map((issue) => ({
+          path: issue.path.join("."),
+          code: issue.code,
+          message: issue.message,
+        })),
+      });
+      return NextResponse.json(
+        {
+          error: {
+            code: "validation_error",
+            message: "Request validation failed.",
+            details: parseResult.error.issues.map((issue) => ({
+              path: issue.path.join("."),
+              message: issue.message,
+            })),
+          },
+        },
+        { status: 400 }
+      );
+    }
+
+    const validatedInput = parseResult.data;
     const service = getPurchaseWorkflowService();
 
     const result = await service.createMultiItemPlan(

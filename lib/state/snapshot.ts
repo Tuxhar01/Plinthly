@@ -41,6 +41,43 @@ export function computeSnapshotHash(candidate: SnapshotCandidateInput): string {
   return createHash("sha256").update(json, "utf8").digest("hex").toLowerCase();
 }
 
+/**
+ * Validates that a snapshot hash is a non-empty, non-whitespace string of exactly 64 hex characters.
+ * Explicitly guards against PostgreSQL CHAR(64) whitespace-padding traps ("                                                                ").
+ */
+export function isValidSnapshotHash(val: unknown): boolean {
+  if (typeof val !== "string") return false;
+  const trimmed = val.trim();
+  if (trimmed.length !== 64) return false;
+  return /^[0-9a-fA-F]{64}$/.test(trimmed);
+}
+
+/**
+ * Resolves a snapshot hash to a validated lowercase 64-hex string.
+ * If the input hash is missing, null, undefined, empty, whitespace-only, or malformed,
+ * deterministically recomputes the canonical SHA-256 snapshot hash.
+ */
+export function resolveValidSnapshotHash(
+  rawHash: unknown,
+  candidate: Partial<SnapshotCandidateInput>
+): string {
+  if (isValidSnapshotHash(rawHash)) {
+    return (rawHash as string).trim().toLowerCase();
+  }
+  return computeSnapshotHash({
+    availability: candidate.availability ?? "in_stock",
+    currency: candidate.currency ?? "USD",
+    externalId: candidate.externalId ?? "",
+    merchantName: candidate.merchantName ?? "",
+    merchantUrl: candidate.merchantUrl ?? "",
+    quantity: candidate.quantity ?? 1,
+    shippingCents: candidate.shippingCents ?? 0,
+    source: candidate.source ?? "channel3",
+    totalCents: candidate.totalCents ?? candidate.unitPriceCents ?? 0,
+    unitPriceCents: candidate.unitPriceCents ?? 0,
+  });
+}
+
 export interface EvidenceFingerprintItem {
   requirementKey: string;
   value: string;

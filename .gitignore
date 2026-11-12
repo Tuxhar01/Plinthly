@@ -23,6 +23,10 @@
 # misc
 .DS_Store
 *.pem
+*.key
+*.p12
+*.crt
+*.cert
 
 # debug
 npm-debug.log*
@@ -43,5 +47,37 @@ next-env.d.ts
 
 /app/generated/prisma
 
-# test artifacts
+# test & database artifacts
 /.data/
+*.sqlite
+*.sqlite3
+*.db
+
+# database backups
+.backups/
+
+# media recordings & artifacts
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# internal phase reports & audit docs (confidential)
+PHASE*_REPORT.md
+PHASE*_*.md
+STAGE_*_REPORT.md
+STAGE_*_AUDIT.md
+STAGE_*_AUDIT_*.md
+STAGE_*_AUDIT_v*.md
+STAGE_*_REMEDIATION_REPORT.md
+STAGE_*_FINAL_*.md
+STAGE_*_IMPLEMENTATION_*.md
+STAGE_*_SAFETY_*.md
+STAGE_*_CORRECTION_*.md
+STAGE_*_REGRESSION_*.md
+STAGE_*_TEST_*.md
+STAGE_*_TRUST_*.md
+PLINTHLY_*_REPORT.md
+PLINTHLY_*_EVIDENCE.md
+PLINTHLY_*_FINAL.md
+PRE_GITHUB_CLEANUP_REPORT.md

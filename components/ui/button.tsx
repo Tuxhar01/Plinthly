@@ -21,9 +21,9 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
   ) => {
     const baseStyles =
       "relative inline-flex items-center justify-center font-medium select-none overflow-hidden text-sm px-4 py-2 " +
-      "transition-[background-color,border-color,color,box-shadow] " +
+      "transition-[background-color,border-color,color,box-shadow,transform] duration-150 " +
       "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--canvas)] " +
-      "active:translate-y-0 active:scale-100 ";
+      "hover:brightness-[1.02] active:scale-[0.985] ";
 
     const variantStyles = {
       primary:

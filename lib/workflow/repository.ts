@@ -895,6 +895,12 @@ export class PrismaPurchaseRepository implements PurchaseRepository {
         selectedCandidateId: purchase.selectedCandidateId,
         ownerUserId: purchase.ownerUserId,
         version: purchase.version,
+        originatingDraftId: (() => {
+          if (!("originatingDraftId" in purchase) || (purchase as Record<string, unknown>).originatingDraftId === undefined) {
+            throw new Error(`Repository mapping failure: originatingDraftId is unexpectedly missing for purchase "${purchase.id}".`);
+          }
+          return purchase.originatingDraftId ?? null;
+        })(),
         createdAt: purchase.createdAt,
         updatedAt: purchase.updatedAt,
       },
@@ -1050,6 +1056,7 @@ export class PrismaPurchaseRepository implements PurchaseRepository {
                 : new Date(0),
             status: e.status,
           })),
+          skipDuplicates: true,
         });
       }
     });
@@ -1527,6 +1534,7 @@ export class InMemoryPurchaseRepository implements PurchaseRepository {
     return {
       purchase: {
         ...purchase,
+        originatingDraftId: purchase.originatingDraftId ?? null,
         policyEvidenceFingerprint: normalizePolicyEvidenceFingerprint(purchase.policyEvidenceFingerprint),
       },
       candidates: allCandidates.map((c) => ({ ...c })),
@@ -1563,14 +1571,20 @@ export class InMemoryPurchaseRepository implements PurchaseRepository {
         ? candidate.capturedAt
         : new Date(0);
     this.candidates.set(candidate.id, { ...candidate, capturedAt: safeCandidateCapturedAt });
-    this.evidence.set(
-      candidate.id,
-      evidence.map((e) => ({
-        ...e,
-        capturedAt:
-          e.capturedAt instanceof Date && !isNaN(e.capturedAt.getTime()) ? e.capturedAt : new Date(0),
-      }))
-    );
+    if (evidence.length > 0) {
+      const existing = this.evidence.get(candidate.id) ?? [];
+      const merged = [...existing];
+      for (const e of evidence) {
+        if (!merged.some((m) => m.id === e.id)) {
+          merged.push({
+            ...e,
+            capturedAt:
+              e.capturedAt instanceof Date && !isNaN(e.capturedAt.getTime()) ? e.capturedAt : new Date(0),
+          });
+        }
+      }
+      this.evidence.set(candidate.id, merged);
+    }
   }
 
   async recordEvaluation(params: RecordEvaluationParams): Promise<PurchaseAggregate> {

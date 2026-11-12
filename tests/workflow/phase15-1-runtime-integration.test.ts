@@ -17,7 +17,7 @@
  * 6. PayPal Sandbox safety: zero PayPal captures across all operations.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { PurchaseWorkflowService } from "../../lib/workflow/service";
 import { InMemoryPurchaseRepository } from "../../lib/workflow/repository";
 import { PayPalSandboxClient } from "../../lib/paypal/client";
@@ -32,6 +32,11 @@ import {
 } from "../../lib/discovery/types";
 import { ProcurementLineItem } from "../../lib/discovery/cart/types";
 import { ApprovalIntegrityError, ValidationError } from "../../lib/workflow/errors";
+import {
+  setNonProductionTestTaxFixture,
+  clearNonProductionTestTaxFixture,
+  createDefensibleTestTaxQuote,
+} from "../../lib/discovery/cart/strategy-engine";
 
 describe("PLINTHLY — PHASE 15.1: Multi-Item Runtime Integration & Verification", () => {
   const defaultDestination: DestinationContext = {
@@ -47,6 +52,7 @@ describe("PLINTHLY — PHASE 15.1: Multi-Item Runtime Integration & Verification
   let service: PurchaseWorkflowService;
 
   beforeEach(() => {
+    setNonProductionTestTaxFixture((dest) => createDefensibleTestTaxQuote({ destination: dest }));
     repo = new InMemoryPurchaseRepository();
     mockPayPal = {
       createOrder: vi.fn().mockResolvedValue({
@@ -64,6 +70,10 @@ describe("PLINTHLY — PHASE 15.1: Multi-Item Runtime Integration & Verification
     } as unknown as PayPalSandboxClient;
 
     service = new PurchaseWorkflowService(repo, mockPayPal);
+  });
+
+  afterEach(() => {
+    clearNonProductionTestTaxFixture();
   });
 
   const sampleLineItems: ProcurementLineItem[] = [

@@ -14,7 +14,7 @@ export function Card({ heading, children, className = "", style, ...props }: Car
         padding: "calc(var(--space-unit) * 4)", // 16px
         ...style,
       }}
-      className={`border text-[var(--ink)] ${className}`.trim()}
+      className={`border text-[var(--ink)] transition-colors duration-200 ${className}`.trim()}
       {...props}
     >
       {heading && (

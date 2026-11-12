@@ -16,7 +16,7 @@
  * 12. Remote PayPal error handling (timeout, 404, nonterminal status, network error).
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { PurchaseWorkflowService } from "../../lib/workflow/service";
 import {
   InMemoryPurchaseRepository,
@@ -43,6 +43,11 @@ import {
   PayPalNetworkError,
 } from "../../lib/paypal/types";
 import { PaymentVerificationService } from "../../lib/paypal/verification";
+import {
+  setNonProductionTestTaxFixture,
+  clearNonProductionTestTaxFixture,
+  createDefensibleTestTaxQuote,
+} from "../../lib/discovery/cart/strategy-engine";
 
 describe("PLINTHLY — PHASE 15.2: Adversarial Runtime Verification & Checkout Integrity", () => {
   const defaultDestination: DestinationContext = {
@@ -58,6 +63,7 @@ describe("PLINTHLY — PHASE 15.2: Adversarial Runtime Verification & Checkout I
   let service: PurchaseWorkflowService;
 
   beforeEach(() => {
+    setNonProductionTestTaxFixture((dest) => createDefensibleTestTaxQuote({ destination: dest }));
     repo = new InMemoryPurchaseRepository();
     mockPayPal = {
       createOrder: vi.fn().mockResolvedValue({
@@ -75,6 +81,10 @@ describe("PLINTHLY — PHASE 15.2: Adversarial Runtime Verification & Checkout I
     } as unknown as PayPalSandboxClient;
 
     service = new PurchaseWorkflowService(repo, mockPayPal);
+  });
+
+  afterEach(() => {
+    clearNonProductionTestTaxFixture();
   });
 
   const lineItemsTwoMerchants: ProcurementLineItem[] = [
@@ -386,20 +396,30 @@ describe("PLINTHLY — PHASE 15.2: Adversarial Runtime Verification & Checkout I
     });
 
     it("3.3 fails closed when destination postal code is excluded under merchant policy", async () => {
-      // Setup purchase for excluded zip code in Alaska/Hawaii
+      // Setup purchase legitimately for excluded zip code in Alaska/Hawaii with defensible tax
       const excludedDest: DestinationContext = {
         country: "US",
-        postalCode: "99501", // Alaska
+        postalCode: "99501", // Alaska (excluded under Best Buy standard shipping policy)
         deliveryMethodPreference: "standard_ground",
       };
 
       const { purchase } = await setupApprovedMultiItemPurchase({ destination: excludedDest });
 
-      await expect(
-        service.createPayPalOrder(purchase.id, buyerActor, {
+      let thrownError: unknown;
+      try {
+        await service.createPayPalOrder(purchase.id, buyerActor, {
           targetCartMerchantDomain: "bestbuy.com",
-        })
-      ).rejects.toThrow(ApprovalIntegrityError);
+        });
+      } catch (err) {
+        thrownError = err;
+      }
+
+      expect(thrownError).toBeInstanceOf(ApprovalIntegrityError);
+      const integrityErr = thrownError as ApprovalIntegrityError;
+      // Demonstrate that the exact rejection is destination_excluded under merchant policy, not an earlier integrity failure
+      expect(integrityErr.code).toBe("destination_excluded");
+      expect(integrityErr.message).toMatch(/excluded zone|not serviceable/i);
+      expect(integrityErr.message).toContain("99501");
 
       expect(mockPayPal.createOrder).not.toHaveBeenCalled();
     });

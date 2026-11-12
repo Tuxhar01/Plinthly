@@ -276,8 +276,8 @@ export class Channel3SourceAdapter implements SourceAdapter {
                   ("reason" in quoteRes
                     ? quoteRes.reason
                     : "errorMessage" in quoteRes
-                    ? quoteRes.errorMessage
-                    : "Shipping quote validation failed");
+                      ? quoteRes.errorMessage
+                      : "Shipping quote validation failed");
 
                 // Phase 13A Hard Invariant: If a quote adapter is actively configured and was queried,
                 // and returned an expired quote, validation failure (mismatched destination, expired, tampered),
@@ -480,6 +480,7 @@ export class Channel3SourceAdapter implements SourceAdapter {
     return {
       status: "success",
       candidates: filtered,
+
       totalFound: filtered.length,
       timestamp: context.now,
     };

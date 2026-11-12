@@ -252,3 +252,297 @@ model QuantityConfirmation {
   @@index([consumedAt])
 }
 
+// ==============================================================================
+// Stage 2: Multi-Retailer Domain, Cryptographic Ingress & Tax Evidence Models
+// Canonical Contract v2.0.11 Section 3.1 (Groups A, B, C)
+// ==============================================================================
+
+// --- Group A: Core Domain Procurement & Multi-Retailer Entities (7) ---
+
+model ProcurementPlan {
+  id              String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String                @db.Uuid
+  strategy        String                @db.VarChar(32)
+  lifecycleStatus String                @db.VarChar(32)
+  createdAt       DateTime              @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  updatedAt       DateTime              @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+
+  lineItems       ProcurementLineItem[]
+  aggregates      ApprovalAggregate[]
+
+  @@index([userId], map: "idx_procurement_plan_user")
+  @@index([lifecycleStatus], map: "idx_procurement_plan_status")
+}
+
+model ProcurementLineItem {
+  id              String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  planId          String           @db.Uuid
+  plan            ProcurementPlan  @relation(fields: [planId], references: [id], onDelete: Cascade)
+  itemDescription String
+  targetQuantity  Int
+  maxUnitCents    BigInt
+  createdAt       DateTime         @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+
+  allocations     CartAllocation[]
+
+  @@index([planId], map: "idx_procurement_line_item_plan")
+}
+
+model ApprovalAggregate {
+  id              String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  planId          String                 @db.Uuid
+  plan            ProcurementPlan        @relation(fields: [planId], references: [id], onDelete: Restrict)
+  aggregateStatus String                 @db.VarChar(32)
+  snapshotDigest  Bytes
+  snapshotPayload Json
+  approvedAt      DateTime               @db.Timestamptz(6)
+  createdAt       DateTime               @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+
+  merchantCarts   ApprovedMerchantCart[]
+
+  @@index([planId], map: "idx_approval_aggregate_plan")
+}
+
+model ApprovedMerchantCart {
+  id                       String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  approvalAggregateId      String                  @db.Uuid
+  approvalAggregate        ApprovalAggregate       @relation(fields: [approvalAggregateId], references: [id], onDelete: Restrict)
+  merchantId               String                  @db.VarChar(64)
+  merchantPayeeEmail       String                  @db.VarChar(255)
+  checkoutStatus           String                  @db.VarChar(32)
+  paypalOrderId            String?                 @db.VarChar(64)
+  merchandiseSubtotalCents BigInt
+  discountCents            BigInt                  @default(0)
+  shippingTotalCents       BigInt                  @default(0)
+  taxAmountCents           BigInt                  @default(0)
+  totalCartCents           BigInt
+  cumulativeRefundedCents  BigInt                  @default(0)
+  lockedAt                 DateTime?               @db.Timestamptz(6)
+  createdAt                DateTime                @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  updatedAt                DateTime                @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+
+  allocations              CartAllocation[]
+  shipments                PlannedShipmentRecord[]
+  paymentEvidence          PaymentEvidenceRecord?
+  taxEvidence              TaxEvidenceRecord?
+  refundEvidenceRecords    RefundEvidenceRecord[]
+  refundRecords            CartRefundRecord[]
+
+  @@index([approvalAggregateId], map: "idx_approved_merchant_cart_aggregate")
+  @@index([checkoutStatus], map: "idx_approved_merchant_cart_status")
+  @@index([paypalOrderId], map: "idx_approved_merchant_cart_order")
+}
+
+model CartAllocation {
+  id                 String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  cartId             String               @db.Uuid
+  cart               ApprovedMerchantCart @relation(fields: [cartId], references: [id], onDelete: Restrict)
+  lineItemId         String               @db.Uuid
+  lineItem           ProcurementLineItem  @relation(fields: [lineItemId], references: [id], onDelete: Restrict)
+  allocatedQuantity  Int
+  allocatedUnitCents BigInt
+  createdAt          DateTime             @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+
+  @@unique([cartId, lineItemId], map: "uq_cart_allocation_item")
+  @@index([cartId], map: "idx_cart_allocation_cart")
+  @@index([lineItemId], map: "idx_cart_allocation_item")
+}
+
+model PlannedShipmentRecord {
+  id                     String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  cartId                 String               @db.Uuid
+  cart                   ApprovedMerchantCart @relation(fields: [cartId], references: [id], onDelete: Restrict)
+  shippingCarrier        String               @db.VarChar(64)
+  shippingTrackingNumber String?              @db.VarChar(128)
+  shippingStatus         String               @default("PLANNED") @db.VarChar(32)
+  dispatchedAt           DateTime?            @db.Timestamptz(6)
+  createdAt              DateTime             @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+
+  @@index([cartId], map: "idx_planned_shipment_cart")
+}
+
+// --- Group C: Security & Cryptographic Infrastructure Entities (3) ---
+
+model AuditSigningKey {
+  key_id            String              @id @db.VarChar(64)
+  key_type          String              @db.VarChar(32)
+  worker_principal  String?             @db.VarChar(64)
+  algorithm         String              @db.VarChar(32)
+  public_key_der    Bytes?
+  key_bytes         Bytes?
+  status            String              @db.VarChar(16)
+  valid_from        DateTime            @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  valid_until       DateTime            @db.Timestamptz(6)
+  revoked_at        DateTime?           @db.Timestamptz(6)
+  revocation_reason String?             @db.VarChar(255)
+  revoked_by        String?             @db.VarChar(64)
+  created_at        DateTime            @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+
+  taxEvidenceRecords TaxEvidenceRecord[]
+
+  @@index([status], map: "idx_audit_signing_key_status")
+  @@index([worker_principal], map: "idx_audit_signing_key_worker")
+}
+
+model TaxAuthorityCertificate {
+  authority_id       String              @db.VarChar(64)
+  certificate_number String              @db.VarChar(64)
+  certificate_pem    String
+  subject_dn         String              @db.VarChar(255)
+  issuer_dn          String              @db.VarChar(255)
+  valid_from         DateTime            @db.Timestamptz(6)
+  valid_until        DateTime            @db.Timestamptz(6)
+  status             String              @db.VarChar(16)
+  revoked_at         DateTime?           @db.Timestamptz(6)
+  revocation_reason  String?             @db.VarChar(255)
+  revoked_by         String?             @db.VarChar(64)
+  created_at         DateTime            @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+
+  taxEvidenceRecords TaxEvidenceRecord[]
+
+  @@id([authority_id, certificate_number])
+  @@index([status], map: "idx_tax_authority_cert_status")
+}
+
+model NonceRegistry {
+  nonce          String   @db.VarChar(64)
+  scope          String   @db.VarChar(32)
+  target_id      String   @db.Uuid
+  request_digest Bytes
+  consumed_at    DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  created_at     DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+
+  @@id([nonce, scope])
+  @@index([target_id], map: "idx_nonce_registry_target")
+}
+
+// --- Group B: Financial & Gateway Ingress Supporting Entities (3) ---
+
+model WebhookTransmission {
+  transmission_id            String                  @id @db.VarChar(64)
+  authenticated_order_id     String?                 @db.VarChar(64)
+  authenticated_capture_id   String?                 @db.VarChar(64)
+  authenticated_refund_id    String?                 @db.VarChar(64)
+  authenticated_amount_cents BigInt
+  authenticated_currency     String                  @db.VarChar(3)
+  authenticated_payee_email  String?                 @db.VarChar(255)
+  authenticated_event_type   String                  @db.VarChar(64)
+  raw_payload                Bytes
+  payload_hash               Bytes
+  status                     String                  @default("RECORDED") @db.VarChar(32)
+  response_code              Int?
+  created_at                 DateTime                @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+
+  paymentEvidenceRecords     PaymentEvidenceRecord[]
+  refundEvidenceRecords      RefundEvidenceRecord[]
+
+  @@index([authenticated_order_id], map: "idx_webhook_tx_order")
+  @@index([authenticated_capture_id], map: "idx_webhook_tx_capture")
+  @@index([status], map: "idx_webhook_tx_status")
+}
+
+model PaymentEvidenceRecord {
+  id                       String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  cart_id                  String               @unique(map: "uq_payment_evidence_cart") @db.Uuid
+  cart                     ApprovedMerchantCart @relation(fields: [cart_id], references: [id], onDelete: Restrict)
+  transmission_id          String               @unique(map: "uq_payment_evidence_transmission") @db.VarChar(64)
+  transmission             WebhookTransmission  @relation(fields: [transmission_id], references: [transmission_id], onDelete: Restrict)
+  capture_id               String               @db.VarChar(64)
+  paypal_order_id          String               @db.VarChar(64)
+  amount_cents             BigInt
+  currency                 String               @db.VarChar(3)
+  payee_email              String               @db.VarChar(255)
+  internal_audit_signature Bytes
+  recorded_at              DateTime             @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+
+  @@index([capture_id], map: "idx_payment_evidence_capture")
+  @@index([paypal_order_id], map: "idx_payment_evidence_order")
+}
+
+model TaxEvidenceRecord {
+  id                                  String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  cart_id                             String                  @unique(map: "uq_tax_evidence_cart") @db.Uuid
+  cart                                ApprovedMerchantCart    @relation(fields: [cart_id], references: [id], onDelete: Restrict)
+  tax_quote_id                        String                  @db.VarChar(64)
+  provider_name                       String                  @db.VarChar(64)
+  provider_api_version                String                  @db.VarChar(32)
+  signature_algorithm                 String                  @db.VarChar(32)
+  provider_timestamp                  DateTime                @db.Timestamptz(6)
+  valid_until                         DateTime                @db.Timestamptz(6)
+  provider_merchandise_subtotal_cents BigInt
+  provider_discount_cents             BigInt
+  provider_shipping_cents             BigInt
+  provider_adjustment_cents           BigInt                  @default(0)
+  provider_total_cents                BigInt
+  total_tax_cents                     BigInt
+  merchandise_tax_cents               BigInt
+  shipping_tax_cents                  BigInt
+  taxable_shipping_base_cents         BigInt
+  currency                            String                  @db.VarChar(3)
+  jurisdiction_code                   String                  @db.VarChar(64)
+  line_items_breakdown                Json
+  jurisdiction_breakdown              Json
+  raw_payload                         Bytes
+  statutory_payload_hash              Bytes
+  statutory_signature                 Bytes
+  authority_id                        String                  @db.VarChar(64)
+  certificate_number                  String                  @db.VarChar(64)
+  authorityCertificate                TaxAuthorityCertificate @relation(fields: [authority_id, certificate_number], references: [authority_id, certificate_number], onDelete: Restrict, map: "fk_tax_evidence_authority_cert")
+  verifier_identity                   String                  @db.VarChar(64)
+  attestation_key_id                  String                  @db.VarChar(64)
+  attestationKey                      AuditSigningKey         @relation(fields: [attestation_key_id], references: [key_id], onDelete: Restrict)
+  attestation_timestamp               DateTime                @db.Timestamptz(6)
+  verifier_attestation_signature      Bytes
+  verification_status                 String                  @db.VarChar(16)
+  internal_audit_signature            Bytes
+  recorded_at                         DateTime                @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+
+  @@index([tax_quote_id], map: "idx_tax_evidence_quote")
+  @@index([attestation_key_id], map: "idx_tax_evidence_attestation_key")
+  @@index([authority_id, certificate_number], map: "idx_tax_evidence_authority_cert")
+}
+
+model RefundEvidenceRecord {
+  id                       String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  cart_id                  String               @db.Uuid
+  cart                     ApprovedMerchantCart @relation(fields: [cart_id], references: [id], onDelete: Restrict)
+  capture_id               String               @db.VarChar(64)
+  transmission_id          String               @unique(map: "uq_refund_evidence_transmission") @db.VarChar(64)
+  transmission             WebhookTransmission  @relation(fields: [transmission_id], references: [transmission_id], onDelete: Restrict)
+  authenticated_refund_id  String               @unique(map: "uq_refund_evidence_authenticated_refund_id") @db.VarChar(64)
+  refund_amount_cents      BigInt
+  currency                 String               @db.VarChar(3)
+  reason                   String?              @db.VarChar(255)
+  internal_audit_signature Bytes
+  recorded_at              DateTime             @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+
+  cartRefundRecords        CartRefundRecord[]
+
+  @@index([cart_id], map: "idx_refund_evidence_cart")
+  @@index([capture_id], map: "idx_refund_evidence_capture")
+}
+
+model CartRefundRecord {
+  id                 String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  cart_id            String                @db.Uuid
+  cart               ApprovedMerchantCart  @relation(fields: [cart_id], references: [id], onDelete: Restrict)
+  capture_id         String                @db.VarChar(64)
+  idempotency_key    String                @db.VarChar(128)
+  amount_cents       BigInt
+  currency           String                @default("USD") @db.VarChar(3)
+  reason             String?               @db.Text
+  status             String                @default("PENDING") @db.VarChar(32)
+  gateway_refund_id  String?               @db.VarChar(64)
+  error_code         String?               @db.VarChar(64)
+  error_message      String?               @db.Text
+  refund_evidence_id String?               @db.Uuid
+  refundEvidence     RefundEvidenceRecord? @relation(fields: [refund_evidence_id], references: [id], onDelete: SetNull)
+  created_at         DateTime              @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  updated_at         DateTime              @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+
+  @@unique([cart_id, idempotency_key], map: "uq_cart_refund_idempotency")
+  @@index([cart_id], map: "idx_cart_refund_cart")
+  @@index([capture_id], map: "idx_cart_refund_capture")
+  @@index([status], map: "idx_cart_refund_status")
+}
+

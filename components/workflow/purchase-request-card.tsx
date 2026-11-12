@@ -28,6 +28,59 @@ function generateIdempotencyKey(): string {
   return `idem_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 }
 
+export interface FormMultiItem {
+  id: string;
+  title: string;
+  quantity: number | null;
+  quantitySource: "explicit" | "inferred" | "unresolved" | "legacy_direct" | "manual_override";
+  quantityConfirmed: boolean;
+  originalInferredQuantity: number | null;
+  confirmationToken?: string;
+  confirmedAt?: string | null;
+  confirmedBy?: string | null;
+  budgetDollars: string;
+  requirements?: Array<{ key: string; expectedValue?: string; description?: string }>;
+}
+
+export function mapLineItemsFromDraft(
+  items: Array<{
+    id?: string;
+    title: string;
+    quantity?: number | null;
+    quantitySource?: "explicit" | "inferred" | "unresolved" | "legacy_direct" | "manual_override";
+    originalInferredQuantity?: number | null;
+    budgetCents?: number | null;
+    requirements?: Array<{ key: string; expectedValue?: string; description?: string }>;
+  }>,
+  actorId: string
+): FormMultiItem[] {
+  return items.map((item, idx) => {
+    const hasExplicitCount =
+      typeof item.quantity === "number" &&
+      item.quantity >= 1 &&
+      item.quantitySource === "explicit";
+
+    return {
+      id: item.id || `line_${idx + 1}`,
+      title: item.title.trim() || `Item ${idx + 1}`,
+      // Rule 4: Never invent quantities. Unspecified quantities remain null and unconfirmed.
+      quantity: hasExplicitCount ? (item.quantity as number) : null,
+      quantitySource: hasExplicitCount ? ("explicit" as const) : ("unresolved" as const),
+      quantityConfirmed: hasExplicitCount,
+      originalInferredQuantity:
+        item.originalInferredQuantity ?? (item.quantitySource === "inferred" ? 1 : null),
+      confirmationToken: undefined,
+      confirmedAt: hasExplicitCount ? new Date().toISOString() : null,
+      confirmedBy: hasExplicitCount ? actorId : null,
+      budgetDollars:
+        item.budgetCents !== null && item.budgetCents !== undefined && item.budgetCents > 0
+          ? (item.budgetCents / 100).toFixed(2)
+          : "",
+      requirements: item.requirements || [],
+    };
+  });
+}
+
 export function PurchaseRequestCard({
   actorId,
   onPurchaseCreated,
@@ -36,70 +89,25 @@ export function PurchaseRequestCard({
   const [aiLoading, setAiLoading] = React.useState<boolean>(false);
   const [aiError, setAiError] = React.useState<string | null>(null);
   const [aiDraft, setAiDraft] = React.useState<DecomposedIntent | null>(null);
+  const activeRequestIdRef = React.useRef<number>(0);
 
   const [procurementMode, setProcurementMode] = React.useState<"single" | "multi">("single");
-  const [multiItems, setMultiItems] = React.useState<
-    Array<{
-      id: string;
-      title: string;
-      quantity: number;
-      quantitySource: "explicit" | "inferred" | "unresolved" | "legacy_direct";
-      quantityConfirmed: boolean;
-      originalInferredQuantity: number | null;
-      confirmationToken?: string;
-      confirmedAt: string | null;
-      confirmedBy: string | null;
-      budgetDollars: string;
-      requirements?: Array<{ key: string; expectedValue?: string; description?: string }>;
-    }>
-  >([
-    {
-      id: "line_1",
-      title: "Dell XPS 15 Laptop (32GB RAM)",
-      quantity: 1,
-      quantitySource: "explicit",
-      quantityConfirmed: true,
-      originalInferredQuantity: null,
-      confirmedAt: null,
-      confirmedBy: null,
-      budgetDollars: "1500.00",
-    },
-    {
-      id: "line_2",
-      title: "Dell UltraSharp 27 4K Monitor",
-      quantity: 1,
-      quantitySource: "explicit",
-      quantityConfirmed: true,
-      originalInferredQuantity: null,
-      confirmedAt: null,
-      confirmedBy: null,
-      budgetDollars: "400.00",
-    },
-    {
-      id: "line_3",
-      title: "USB-C Dual 4K Docking Station",
-      quantity: 1,
-      quantitySource: "explicit",
-      quantityConfirmed: true,
-      originalInferredQuantity: null,
-      confirmedAt: null,
-      confirmedBy: null,
-      budgetDollars: "150.00",
-    },
-  ]);
+  const [multiItems, setMultiItems] = React.useState<FormMultiItem[]>([]);
 
-  const [budgetDollars, setBudgetDollars] = React.useState<string>("150.00");
-  const [postalCode, setPostalCode] = React.useState<string>("98101");
-  const [requirementsText, setRequirementsText] = React.useState<string>(
-    "merchant_spec: Dell XPS 15 or equivalent\nreputation_check: Approved Merchant\nfreshness: Valid recent capture"
-  );
-  const [quantity, setQuantity] = React.useState<number>(1);
+  const [budgetDollars, setBudgetDollars] = React.useState<string>("");
+  const [postalCode, setPostalCode] = React.useState<string>("");
+  const [requirementsText, setRequirementsText] = React.useState<string>("");
+  const [quantity, setQuantity] = React.useState<number | null>(null);
   const [quantitySource, setQuantitySource] = React.useState<
-    "explicit" | "inferred" | "unresolved" | "legacy_direct"
-  >("explicit");
-  const [quantityConfirmed, setQuantityConfirmed] = React.useState<boolean>(true);
+    "explicit" | "inferred" | "unresolved" | "legacy_direct" | "manual_override"
+  >("unresolved");
+  const [quantityConfirmed, setQuantityConfirmed] = React.useState<boolean>(false);
   const [originalInferredQuantity, setOriginalInferredQuantity] = React.useState<number | null>(null);
   const [singleConfirmationToken, setSingleConfirmationToken] = React.useState<string | undefined>(undefined);
+
+  // User manual editing & synthetic demonstration flags
+  const [isManuallyEdited, setIsManuallyEdited] = React.useState<boolean>(false);
+  const [isDemoTemplateLoaded, setIsDemoTemplateLoaded] = React.useState<boolean>(false);
 
   const [idempotencyKey, setIdempotencyKey] = React.useState<string>("");
   const [loading, setLoading] = React.useState<boolean>(false);
@@ -107,9 +115,103 @@ export function PurchaseRequestCard({
   const [serverError, setServerError] = React.useState<string | null>(null);
   const [successMessage, setSuccessMessage] = React.useState<string | null>(null);
 
+  const handleClearForm = () => {
+    setBudgetDollars("");
+    setPostalCode("");
+    setRequirementsText("");
+    setQuantity(null);
+    setQuantitySource("unresolved");
+    setQuantityConfirmed(false);
+    setOriginalInferredQuantity(null);
+    setSingleConfirmationToken(undefined);
+    setMultiItems([]);
+    setAiDraft(null);
+    setAiError(null);
+    setSuccessMessage(null);
+    setServerError(null);
+    setClientErrors({});
+    setIsManuallyEdited(false);
+    setIsDemoTemplateLoaded(false);
+  };
+
+  const handleLoadDemoTemplate = () => {
+    setIsDemoTemplateLoaded(true);
+    setIsManuallyEdited(false);
+    setClientErrors({});
+    setServerError(null);
+    setSuccessMessage(null);
+    setAiError(null);
+    setAiDraft(null);
+
+    if (procurementMode === "multi") {
+      setBudgetDollars("2050.00");
+      setPostalCode("98101");
+      setMultiItems([
+        {
+          id: "line_1",
+          title: "Dell XPS 15 Laptop (32GB RAM) [Synthetic Demo]",
+          quantity: 1,
+          quantitySource: "explicit",
+          quantityConfirmed: true,
+          originalInferredQuantity: null,
+          confirmedAt: new Date().toISOString(),
+          confirmedBy: actorId,
+          budgetDollars: "1500.00",
+          requirements: [
+            { key: "merchant_spec", expectedValue: "Dell XPS 15 or equivalent" },
+            { key: "condition", expectedValue: "New / Certified Refurbished" },
+          ],
+        },
+        {
+          id: "line_2",
+          title: "Dell UltraSharp 27 4K Monitor [Synthetic Demo]",
+          quantity: 1,
+          quantitySource: "explicit",
+          quantityConfirmed: true,
+          originalInferredQuantity: null,
+          confirmedAt: new Date().toISOString(),
+          confirmedBy: actorId,
+          budgetDollars: "400.00",
+          requirements: [{ key: "resolution", expectedValue: "4K UHD" }],
+        },
+        {
+          id: "line_3",
+          title: "USB-C Dual 4K Docking Station [Synthetic Demo]",
+          quantity: 1,
+          quantitySource: "explicit",
+          quantityConfirmed: true,
+          originalInferredQuantity: null,
+          confirmedAt: new Date().toISOString(),
+          confirmedBy: actorId,
+          budgetDollars: "150.00",
+          requirements: [{ key: "ports", expectedValue: "Dual HDMI / DisplayPort" }],
+        },
+      ]);
+    } else {
+      setBudgetDollars("1500.00");
+      setPostalCode("98101");
+      setRequirementsText(
+        "merchant_spec: Dell XPS 15 (Synthetic Demo)\nreputation_check: Approved Merchant (Demo)\nfreshness: Valid recent capture"
+      );
+      setQuantity(1);
+      setQuantitySource("explicit");
+      setQuantityConfirmed(true);
+      setOriginalInferredQuantity(null);
+      setSingleConfirmationToken(undefined);
+    }
+  };
+
   const handleConfirmLineItemQuantity = async (idx: number) => {
     const item = multiItems[idx];
     if (!item) return;
+
+    if (item.quantity === null || item.quantity < 1) {
+      setClientErrors((prev) => ({
+        ...prev,
+        [`item_${idx}_quantity`]: "Please specify an integer quantity of at least 1 before confirming.",
+      }));
+      return;
+    }
 
     const totalBudgetCents = multiItems.reduce(
       (sum, it) => sum + Math.round((parseFloat(it.budgetDollars) || 0) * 100),
@@ -149,6 +251,7 @@ export function PurchaseRequestCard({
         const updated = [...prev];
         updated[idx] = {
           ...item,
+          quantitySource: "explicit",
           quantityConfirmed: true,
           confirmationToken: conf.confirmationToken,
           confirmedAt: conf.confirmedAt,
@@ -162,6 +265,14 @@ export function PurchaseRequestCard({
   };
 
   const handleConfirmSingleQuantity = async () => {
+    if (quantity === null || quantity < 1) {
+      setClientErrors((prev) => ({
+        ...prev,
+        quantity: "Please specify an integer quantity of at least 1 before confirming.",
+      }));
+      return;
+    }
+
     const parsedDollars = parseFloat(budgetDollars);
     const budgetCents = Math.round((isNaN(parsedDollars) ? 0 : parsedDollars) * 100);
 
@@ -181,7 +292,7 @@ export function PurchaseRequestCard({
         {
           draft,
           lineItemId: "single_item",
-          confirmedQuantity: quantity,
+          confirmedQuantity: quantity as number,
         },
         { actorId }
       );
@@ -205,15 +316,55 @@ export function PurchaseRequestCard({
       return;
     }
 
+    const currentRequestId = ++activeRequestIdRef.current;
+    // Immediately invalidate previous AI draft and errors
+    setAiDraft(null);
     setAiError(null);
     setAiLoading(true);
+
+    // If the form was NOT manually edited by the buyer, clear previous draft/demo state
+    // so a failed decomposition never leaves unrelated or stale data
+    if (!isManuallyEdited) {
+      setBudgetDollars("");
+      setPostalCode("");
+      setRequirementsText("");
+      setQuantity(null);
+      setQuantitySource("unresolved");
+      setQuantityConfirmed(false);
+      setOriginalInferredQuantity(null);
+      setSingleConfirmationToken(undefined);
+      setMultiItems([]);
+      setIsDemoTemplateLoaded(false);
+    }
+
     try {
       const result = await decomposePurchaseIntentApi(trimmed, { actorId });
+
+      // Ignore late responses belonging to older requests
+      if (activeRequestIdRef.current !== currentRequestId) {
+        return;
+      }
+
       if (!result.ok) {
+        // On timeout or provider failure, display only the current request's error
+        // Never present an old successful extraction as the result of a new request
         setAiError(`[${result.error.code}] ${result.error.message}`);
+        setAiDraft(null);
+        if (!isManuallyEdited) {
+          setBudgetDollars("");
+          setPostalCode("");
+          setRequirementsText("");
+          setQuantity(null);
+          setQuantitySource("unresolved");
+          setQuantityConfirmed(false);
+          setMultiItems([]);
+          setIsDemoTemplateLoaded(false);
+        }
       } else {
         const data = result.data;
         setAiDraft(data);
+        setIsDemoTemplateLoaded(false);
+        setIsManuallyEdited(false);
 
         // Update draft fields without inventing facts
         if (data.budgetCents !== null) {
@@ -221,17 +372,18 @@ export function PurchaseRequestCard({
         }
 
         // Single-item quantity handling:
-        if (data.quantity !== null && data.quantitySource === "explicit") {
+        if (typeof data.quantity === "number" && data.quantity >= 1 && data.quantitySource === "explicit") {
           setQuantity(data.quantity);
           setQuantitySource("explicit");
           setQuantityConfirmed(true);
           setOriginalInferredQuantity(null);
           setSingleConfirmationToken(undefined);
         } else {
-          setQuantity(1);
-          setQuantitySource("inferred");
+          // Do not silently default to 1! Keep null/unspecified!
+          setQuantity(null);
+          setQuantitySource("unresolved");
           setQuantityConfirmed(false);
-          setOriginalInferredQuantity(1);
+          setOriginalInferredQuantity(null);
           setSingleConfirmationToken(undefined);
         }
 
@@ -245,37 +397,52 @@ export function PurchaseRequestCard({
           setRequirementsText(formatted);
         }
 
-        // Multi-Item mode integration:
-        if (data.lineItems && data.lineItems.length > 1) {
-          setProcurementMode("multi");
-          setMultiItems(
-            data.lineItems.map((item, idx) => {
-              const isInferred =
-                item.quantity === null ||
-                item.quantitySource === "inferred" ||
-                item.quantitySource === "unresolved";
-              return {
-                id: `line_${idx + 1}`,
-                title: item.title.trim() || `Item ${idx + 1}`,
-                quantity: item.quantity && item.quantity >= 1 ? item.quantity : 1,
-                quantitySource: isInferred ? ("inferred" as const) : ("explicit" as const),
-                quantityConfirmed: !isInferred, // Inferred quantities start UNCONFIRMED (false)
-                originalInferredQuantity: isInferred ? (item.originalInferredQuantity ?? 1) : null,
-                confirmationToken: undefined,
-                confirmedAt: !isInferred ? new Date().toISOString() : null,
-                confirmedBy: !isInferred ? actorId : null,
-                budgetDollars:
-                  item.budgetCents !== null && item.budgetCents !== undefined && item.budgetCents > 0
-                    ? (item.budgetCents / 100).toFixed(2)
-                    : "",
-                requirements: item.requirements || [],
-              };
-            })
+        // Form synchronization for multi-item intent:
+        // Rule 1 & 2: When Gemini successfully returns multiple lineItems, automatically populate multiItems
+        // with every extracted item, regardless of whether Single-Item or Multi-Item mode is currently selected.
+        try {
+          if (data.lineItems && data.lineItems.length > 0) {
+            const mappedItems = mapLineItemsFromDraft(data.lineItems, actorId);
+            if (mappedItems.length === 0) {
+              throw new Error("Line items collection was empty after mapping.");
+            }
+            setMultiItems(mappedItems);
+            // Automatically switch to multi-item mode when multiple items are extracted
+            if (mappedItems.length > 1) {
+              setProcurementMode("multi");
+            }
+          }
+        } catch (syncErr: unknown) {
+          // Rule 7: If extraction succeeds but form synchronization fails, show an explicit error
+          // instead of silently displaying an empty form.
+          setAiError(
+            `[draft_sync_error] ${
+              syncErr instanceof Error
+                ? syncErr.message
+                : "Failed to synchronize extracted line items to procurement form."
+            }`
           );
         }
       }
+    } catch (err: unknown) {
+      if (activeRequestIdRef.current === currentRequestId) {
+        setAiError(err instanceof Error ? err.message : "AI intent decomposition failed.");
+        setAiDraft(null);
+        if (!isManuallyEdited) {
+          setBudgetDollars("");
+          setPostalCode("");
+          setRequirementsText("");
+          setQuantity(null);
+          setQuantitySource("unresolved");
+          setQuantityConfirmed(false);
+          setMultiItems([]);
+          setIsDemoTemplateLoaded(false);
+        }
+      }
     } finally {
-      setAiLoading(false);
+      if (activeRequestIdRef.current === currentRequestId) {
+        setAiLoading(false);
+      }
     }
   };
 
@@ -286,25 +453,37 @@ export function PurchaseRequestCard({
       if (multiItems.length === 0) {
         errors.multiItems = "At least one line item is required.";
       }
+
+      const parsedAggregate = parseFloat(budgetDollars);
+      const hasValidAggregate = !isNaN(parsedAggregate) && parsedAggregate > 0;
+      const hasAnyItemBudget = multiItems.some((it) => {
+        const b = parseFloat(it.budgetDollars);
+        return !isNaN(b) && b > 0;
+      });
+
+      if (!hasValidAggregate && !hasAnyItemBudget) {
+        errors.budget = "Please specify an aggregate procurement budget or set individual item budgets.";
+      }
+
       for (let i = 0; i < multiItems.length; i++) {
         const item = multiItems[i];
         if (!item.title.trim()) {
           errors[`item_${i}_title`] = "Item title is required.";
         }
         const b = parseFloat(item.budgetDollars);
-        if (isNaN(b) || b <= 0) {
-          errors[`item_${i}_budget`] = "Valid positive budget required.";
+        if (!hasValidAggregate && (isNaN(b) || b <= 0)) {
+          errors[`item_${i}_budget`] = "Item budget is required when no aggregate budget is set.";
         }
-        if (item.quantity < 1 || !Number.isInteger(item.quantity)) {
-          errors[`item_${i}_quantity`] = "Quantity must be an integer >= 1.";
+        if (item.quantity === null || item.quantity === undefined || item.quantity < 1 || !Number.isInteger(item.quantity)) {
+          errors[`item_${i}_quantity`] = `Quantity for "${item.title}" is unspecified. Please confirm quantity before submission.`;
         }
       }
 
       const unconfirmed = multiItems.filter(
-        (item) => item.quantitySource === "inferred" && !item.quantityConfirmed
+        (item) => item.quantity === null || !item.quantityConfirmed || item.quantitySource === "unresolved"
       );
       if (unconfirmed.length > 0) {
-        errors.multiItems = `Cannot submit purchase: ${unconfirmed.length} line item(s) have unconfirmed inferred quantities. Please click "Confirm" or edit quantity for each item.`;
+        errors.multiItems = `Cannot submit purchase: ${unconfirmed.length} line item(s) have unspecified or unconfirmed quantities. Please specify and confirm quantities before submission.`;
       }
     } else {
       const parsedDollars = parseFloat(budgetDollars);
@@ -320,12 +499,10 @@ export function PurchaseRequestCard({
         errors.requirements = "At least one requirement is required.";
       }
 
-      if (quantity < 1 || !Number.isInteger(quantity)) {
-        errors.quantity = "Quantity must be an integer of 1 or greater.";
-      }
-
-      if (quantitySource === "inferred" && !quantityConfirmed) {
-        errors.quantity = 'Inferred quantity requires explicit confirmation. Please click "Confirm" or edit quantity.';
+      if (quantity === null || quantity === undefined || quantity < 1 || !Number.isInteger(quantity)) {
+        errors.quantity = "Quantity is unspecified. Buyer confirmation required before submission.";
+      } else if (!quantityConfirmed) {
+        errors.quantity = "Quantity requires explicit confirmation before submission.";
       }
     }
 
@@ -366,7 +543,7 @@ export function PurchaseRequestCard({
       id: string;
       title: string;
       quantity: number;
-      budgetCents: number;
+      budgetCents?: number;
       currency: "USD";
       requirements: Array<string | { key: string; expectedValue?: string; description?: string }>;
       verificationLevel: "standard";
@@ -374,25 +551,41 @@ export function PurchaseRequestCard({
     let requestedQuantity: number;
 
     if (procurementMode === "multi") {
-      budgetCents = multiItems.reduce(
+      const parsedAggregate = parseFloat(budgetDollars);
+      const itemSum = multiItems.reduce(
         (sum, item) => sum + Math.round((parseFloat(item.budgetDollars) || 0) * 100),
         0
       );
-      requestedQuantity = multiItems.reduce((sum, item) => sum + (item.quantity || 1), 0);
-      lineItemReqs = multiItems.map((item) => ({
-        id: item.id,
-        title: item.title.trim(),
-        quantity: item.quantity,
-        quantitySource: item.quantitySource,
-        quantityConfirmed: item.quantityConfirmed,
-        originalInferredQuantity: item.originalInferredQuantity,
-        confirmationToken: item.confirmationToken,
-        budgetCents: Math.round((parseFloat(item.budgetDollars) || 0) * 100),
-        currency: "USD" as const,
-        requirements: item.requirements || [],
-        verificationLevel: "standard" as const,
-      }));
+      budgetCents = !isNaN(parsedAggregate) && parsedAggregate > 0
+        ? Math.round(parsedAggregate * 100)
+        : itemSum;
+
+      requestedQuantity = multiItems.reduce((sum, item) => sum + (item.quantity || 0), 0);
+      if (requestedQuantity < 1 || multiItems.some((it) => it.quantity === null || it.quantity < 1)) {
+        setClientErrors({ multiItems: "Cannot submit purchase: line item quantities must be specified and at least 1." });
+        return;
+      }
+      lineItemReqs = multiItems.map((item) => {
+        const itemB = Math.round((parseFloat(item.budgetDollars) || 0) * 100);
+        return {
+          id: item.id,
+          title: item.title.trim(),
+          quantity: item.quantity as number,
+          quantitySource: item.quantitySource,
+          quantityConfirmed: item.quantityConfirmed,
+          originalInferredQuantity: item.originalInferredQuantity,
+          confirmationToken: item.confirmationToken,
+          budgetCents: itemB > 0 ? itemB : undefined,
+          currency: "USD" as const,
+          requirements: item.requirements || [],
+          verificationLevel: "standard" as const,
+        };
+      });
     } else {
+      if (quantity === null || quantity < 1) {
+        setClientErrors({ quantity: "Please specify a quantity of at least 1." });
+        return;
+      }
       const parsedDollars = parseFloat(budgetDollars);
       budgetCents = Math.round(parsedDollars * 100);
       requestedQuantity = quantity;
@@ -463,7 +656,7 @@ export function PurchaseRequestCard({
       {/* Gemini Natural Language Decomposition Assistant */}
       <div className="mb-6 p-4 rounded-md border border-[var(--line)] bg-[var(--surface-muted)]">
         <div className="flex items-center gap-2 mb-2">
-          <Sparkles className="w-4 h-4 text-purple-600" />
+          <Sparkles className={`w-4 h-4 text-purple-600 ${aiLoading ? "animate-spin" : "animate-pulse-subtle"}`} />
           <h3 className="text-sm font-semibold text-[var(--ink-base)]">
             AI Purchase Intent Decomposition (Google Gemini)
           </h3>
@@ -497,26 +690,53 @@ export function PurchaseRequestCard({
         </div>
 
         {aiError && (
-          <div className="mt-3">
-            <Banner variant="error">{aiError}</Banner>
+          <div className="mt-3 flex flex-col gap-2">
+            <Banner variant="error">
+              <div className="flex flex-col gap-1">
+                <span className="font-semibold text-xs">{aiError}</span>
+                <span className="text-xs text-[var(--ink-muted)]">
+                  Manual Entry Fallback: You can configure, review, and submit your purchase request manually using the form fields below.
+                </span>
+              </div>
+            </Banner>
+            <div className="flex justify-end">
+              <Button
+                type="button"
+                variant="secondary"
+                className="text-xs"
+                onClick={handleDecompose}
+                disabled={aiLoading || !naturalLanguagePrompt.trim()}
+              >
+                Retry AI Decomposition
+              </Button>
+            </div>
           </div>
         )}
 
         {aiDraft && (
-          <div className="mt-3 flex flex-col gap-2">
+          <div className="mt-3 flex flex-col gap-2 animate-fade-in-up duration-250">
             <Banner variant="info">
               <div className="flex flex-col gap-1">
                 <span className="font-semibold text-xs">
                   AI Draft Generated — Buyer Review Required:
                 </span>
                 <span className="text-xs">
-                  Keywords: <span className="font-mono">{aiDraft.productKeywords}</span> | Model Confidence Estimate:{" "}
+                  Keywords: <span className="font-mono">{aiDraft.productKeywords}</span>
+                  {procurementMode === "multi" && (
+                    <> | Extracted Items: <span className="font-semibold">{multiItems.length}</span></>
+                  )}
+                  {" "}| Model Assessment:{" "}
                   <span className="font-semibold capitalize">{aiDraft.confidenceEstimate.label}</span>{" "}
-                  ({Math.round(aiDraft.confidenceEstimate.score * 100)}%, uncalibrated model estimate, not a calibrated probability).
+                  (Qualitative heuristic estimate; not a calibrated probability).
                 </span>
                 {aiDraft.confidenceEstimate.notes && (
                   <span className="text-xs text-[var(--ink-muted)]">
                     Notes: {aiDraft.confidenceEstimate.notes}
+                  </span>
+                )}
+                {procurementMode === "multi" && multiItems.length === 0 && (
+                  <span className="text-xs text-amber-700 font-medium">
+                    Note: Zero line items are currently populated in the multi-item form below.
                   </span>
                 )}
               </div>
@@ -532,7 +752,13 @@ export function PurchaseRequestCard({
                     ))}
                   </ul>
                   <span className="italic mt-1">
-                    Please review and adjust the populated requirements below before submitting.
+                    {procurementMode === "multi"
+                      ? multiItems.length > 0
+                        ? "Please review and adjust the populated requirements below before submitting."
+                        : "Form currently contains 0 line items. Please review unresolved ambiguities and add line items before submitting."
+                      : requirementsText.trim()
+                        ? "Please review and adjust the populated requirements below before submitting."
+                        : "Form currently contains no populated requirements. Please review unresolved ambiguities and enter requirements before submitting."}
                   </span>
                 </div>
               </Banner>
@@ -553,32 +779,93 @@ export function PurchaseRequestCard({
         </div>
       )}
 
-      {/* Mode Switcher: Single Item vs Multi-Item Cart */}
-      <div className="flex items-center gap-2 mb-4 border-b border-[var(--line)] pb-3">
-        <span className="text-xs font-semibold text-[var(--ink-muted)]">Procurement Mode:</span>
-        <button
-          type="button"
-          onClick={() => setProcurementMode("single")}
-          className={`text-xs px-3 py-1.5 rounded font-medium transition-colors ${
-            procurementMode === "single"
-              ? "bg-[var(--accent)] text-white"
-              : "bg-[var(--surface-raised)] text-[var(--ink-muted)] border border-[var(--line)] hover:bg-[var(--surface-hover)]"
-          }`}
-        >
-          Single-Item Procurement
-        </button>
-        <button
-          type="button"
-          onClick={() => setProcurementMode("multi")}
-          className={`text-xs px-3 py-1.5 rounded font-medium transition-colors ${
-            procurementMode === "multi"
-              ? "bg-[var(--accent)] text-white"
-              : "bg-[var(--surface-raised)] text-[var(--ink-muted)] border border-[var(--line)] hover:bg-[var(--surface-hover)]"
-          }`}
-        >
-          Multi-Item Cart Aggregation
-        </button>
+      {/* Mode Switcher: Single Item vs Multi-Item Cart & Demo Template Actions */}
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-4 border-b border-[var(--line)] pb-3">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-semibold text-[var(--ink-muted)]">Procurement Mode:</span>
+          <button
+            type="button"
+            onClick={() => setProcurementMode("single")}
+            className={`text-xs px-3 py-1.5 rounded font-medium transition-all duration-150 active:scale-[0.98] cursor-pointer ${
+              procurementMode === "single"
+                ? "bg-[var(--accent)] text-white shadow-2xs"
+                : "bg-[var(--surface-raised)] text-[var(--ink-muted)] border border-[var(--line)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)]"
+            }`}
+          >
+            Single-Item Procurement
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setProcurementMode("multi");
+              // Rule 3: Switching procurement modes preserves extracted line items.
+              // If multiItems is currently empty, but active aiDraft has lineItems, synchronize them.
+              if (multiItems.length === 0 && aiDraft?.lineItems && aiDraft.lineItems.length > 0) {
+                try {
+                  const mapped = mapLineItemsFromDraft(aiDraft.lineItems, actorId);
+                  if (mapped.length > 0) {
+                    setMultiItems(mapped);
+                  }
+                } catch (syncErr: unknown) {
+                  setAiError(
+                    `[draft_sync_error] ${
+                      syncErr instanceof Error
+                        ? syncErr.message
+                        : "Failed to synchronize extracted line items to procurement form."
+                    }`
+                  );
+                }
+              }
+            }}
+            className={`text-xs px-3 py-1.5 rounded font-medium transition-all duration-150 active:scale-[0.98] cursor-pointer ${
+              procurementMode === "multi"
+                ? "bg-[var(--accent)] text-white shadow-2xs"
+                : "bg-[var(--surface-raised)] text-[var(--ink-muted)] border border-[var(--line)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)]"
+            }`}
+          >
+            Multi-Item Cart Aggregation
+          </button>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={handleLoadDemoTemplate}
+            disabled={loading || aiLoading}
+            className="text-xs py-1 px-2.5 bg-[var(--surface-raised)] border border-[var(--line)] hover:bg-[var(--surface-hover)]"
+            title="Populate synthetic demonstration data (does not initiate payment or create purchase)"
+          >
+            Load Demo Template
+          </Button>
+          {(budgetDollars || requirementsText || postalCode || multiItems.length > 0 || isDemoTemplateLoaded || aiDraft) && (
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={handleClearForm}
+              disabled={loading}
+              className="text-xs py-1 px-2 text-[var(--ink-muted)] hover:text-[var(--ink)]"
+              title="Clear all manual form fields"
+            >
+              Clear Form
+            </Button>
+          )}
+        </div>
       </div>
+
+      {isDemoTemplateLoaded && (
+        <div className="mb-4">
+          <Banner variant="info">
+            <div className="flex flex-col gap-1 text-xs">
+              <span className="font-semibold text-blue-900">
+                [Synthetic Demo Template Loaded — Demonstration Purposes Only]
+              </span>
+              <span className="text-blue-800">
+                This template contains pre-configured synthetic sample data. It does not initiate payment or create purchases automatically. Explicit buyer review and confirmation of all mandatory fields is required before submission.
+              </span>
+            </div>
+          </Banner>
+        </div>
+      )}
 
       <form onSubmit={handleSubmit} className="flex flex-col gap-4">
         {procurementMode === "single" ? (
@@ -600,7 +887,11 @@ export function PurchaseRequestCard({
                     step="0.01"
                     min="0.01"
                     value={budgetDollars}
-                    onChange={(e) => setBudgetDollars(e.target.value)}
+                    onChange={(e) => {
+                      setBudgetDollars(e.target.value);
+                      setIsManuallyEdited(true);
+                      setIsDemoTemplateLoaded(false);
+                    }}
                     error={Boolean(clientErrors.budget)}
                     disabled={loading}
                     className="pl-7"
@@ -626,34 +917,33 @@ export function PurchaseRequestCard({
                       type="number"
                       min="1"
                       step="1"
-                      value={quantity}
+                      placeholder="Enter quantity"
+                      value={quantity !== null && quantity !== undefined ? quantity : ""}
                       onChange={(e) => {
-                        const parsed = parseInt(e.target.value, 10);
-                        const newQty = Number.isInteger(parsed) && parsed >= 1 ? parsed : 1;
-                        const isRevertedToInferred =
-                          originalInferredQuantity !== null && newQty === originalInferredQuantity;
-                        if (isRevertedToInferred) {
-                          setQuantity(newQty);
-                          setQuantitySource("inferred");
-                          setQuantityConfirmed(false);
-                          setSingleConfirmationToken(undefined);
-                        } else {
-                          setQuantity(newQty);
-                          setQuantitySource("explicit");
-                          setQuantityConfirmed(true);
-                          setSingleConfirmationToken(undefined);
-                        }
+                        const val = e.target.value.trim();
+                        const parsed = parseInt(val, 10);
+                        const newQty = val !== "" && Number.isInteger(parsed) && parsed >= 1 ? parsed : null;
+                        setQuantity(newQty);
+                        setQuantitySource(newQty !== null ? "explicit" : "unresolved");
+                        setQuantityConfirmed(newQty !== null);
+                        setSingleConfirmationToken(undefined);
+                        setIsManuallyEdited(true);
+                        setIsDemoTemplateLoaded(false);
                       }}
                       error={Boolean(clientErrors.quantity)}
                       disabled={loading}
                       className={
-                        quantitySource === "inferred" && !quantityConfirmed
+                        quantity === null || (quantitySource === "inferred" && !quantityConfirmed)
                           ? "border-amber-400 bg-amber-50/40 text-amber-950 font-medium"
                           : ""
                       }
                       required
                     />
-                    {quantitySource === "inferred" && !quantityConfirmed ? (
+                    {quantity === null ? (
+                      <span className="text-xs text-amber-800 bg-amber-100 border border-amber-300 rounded px-2.5 py-1 font-medium whitespace-nowrap">
+                        ⚠️ Clarification: Specify Qty
+                      </span>
+                    ) : quantitySource === "inferred" && !quantityConfirmed ? (
                       <Button
                         type="button"
                         variant="secondary"
@@ -663,7 +953,7 @@ export function PurchaseRequestCard({
                       >
                         ⚠️ Confirm ({quantity})
                       </Button>
-                    ) : quantitySource === "inferred" && quantityConfirmed ? (
+                    ) : quantityConfirmed ? (
                       <span className="text-xs text-emerald-700 font-medium whitespace-nowrap flex items-center gap-1">
                         ✓ Confirmed
                       </span>
@@ -683,7 +973,11 @@ export function PurchaseRequestCard({
                   type="text"
                   placeholder="e.g. 98101"
                   value={postalCode}
-                  onChange={(e) => setPostalCode(e.target.value)}
+                  onChange={(e) => {
+                    setPostalCode(e.target.value);
+                    setIsManuallyEdited(true);
+                    setIsDemoTemplateLoaded(false);
+                  }}
                   error={Boolean(clientErrors.postalCode)}
                   disabled={loading}
                   className="font-mono"
@@ -701,7 +995,11 @@ export function PurchaseRequestCard({
                 id="purchase-requirements"
                 rows={3}
                 value={requirementsText}
-                onChange={(e) => setRequirementsText(e.target.value)}
+                onChange={(e) => {
+                  setRequirementsText(e.target.value);
+                  setIsManuallyEdited(true);
+                  setIsDemoTemplateLoaded(false);
+                }}
                 error={Boolean(clientErrors.requirements)}
                 disabled={loading}
                 required
@@ -722,28 +1020,74 @@ export function PurchaseRequestCard({
                   type="text"
                   placeholder="e.g. 98101"
                   value={postalCode}
-                  onChange={(e) => setPostalCode(e.target.value)}
+                  onChange={(e) => {
+                    setPostalCode(e.target.value);
+                    setIsManuallyEdited(true);
+                    setIsDemoTemplateLoaded(false);
+                  }}
                   error={Boolean(clientErrors.postalCode)}
                   disabled={loading}
                   className="font-mono"
                 />
               </Field>
 
-              <div className="p-3 bg-[var(--surface-raised)] border border-[var(--line)] rounded-md flex flex-col justify-center">
-                <span className="text-xs text-[var(--ink-muted)]">Calculated Aggregate Budget:</span>
-                <span className="text-base font-bold font-mono text-[var(--ink)]">
-                  $
-                  {(
-                    multiItems.reduce(
-                      (acc, item) => acc + Math.round((parseFloat(item.budgetDollars) || 0) * 100),
-                      0
-                    ) / 100
-                  ).toFixed(2)}{" "}
-                  USD
-                </span>
-                <span className="text-[11px] text-[var(--ink-muted)]">
-                  Across {multiItems.length} required item(s)
-                </span>
+              <Field
+                label="Aggregate Buyer Budget (USD)"
+                htmlFor="multi-purchase-budget"
+                hint="Total buyer budget across all requested items"
+                error={clientErrors.budget}
+              >
+                <Input
+                  id="multi-purchase-budget"
+                  type="text"
+                  placeholder="e.g. 5000.00"
+                  value={budgetDollars}
+                  onChange={(e) => {
+                    setBudgetDollars(e.target.value);
+                    setIsManuallyEdited(true);
+                    setIsDemoTemplateLoaded(false);
+                  }}
+                  error={Boolean(clientErrors.budget)}
+                  disabled={loading}
+                  className="font-mono"
+                />
+              </Field>
+
+              <div className="col-span-full p-3 bg-[var(--surface-raised)] border border-[var(--line)] rounded-md grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="flex flex-col">
+                  <span className="text-[11px] font-medium text-[var(--ink-muted)]">Aggregate Buyer Budget:</span>
+                  <span className="text-sm font-bold font-mono text-[var(--ink)]">
+                    {!isNaN(parseFloat(budgetDollars)) && parseFloat(budgetDollars) > 0
+                      ? `$${parseFloat(budgetDollars).toFixed(2)} USD`
+                      : "Unspecified"}
+                  </span>
+                  <span className="text-[10px] text-[var(--ink-muted)]">Target expenditure limit</span>
+                </div>
+                <div className="flex flex-col">
+                  <span className="text-[11px] font-medium text-[var(--ink-muted)]">Individual Item Budgets:</span>
+                  <span className="text-sm font-semibold font-mono text-[var(--ink)]">
+                    {multiItems.some((it) => !isNaN(parseFloat(it.budgetDollars)) && parseFloat(it.budgetDollars) > 0)
+                      ? `$${(
+                          multiItems.reduce(
+                            (acc, item) => acc + Math.round((parseFloat(item.budgetDollars) || 0) * 100),
+                            0
+                          ) / 100
+                        ).toFixed(2)} USD`
+                      : "Unspecified"}
+                  </span>
+                  <span className="text-[10px] text-[var(--ink-muted)]">
+                    {multiItems.some((it) => !isNaN(parseFloat(it.budgetDollars)) && parseFloat(it.budgetDollars) > 0)
+                      ? `Sum of item-level ceilings (${multiItems.length} items)`
+                      : "Item-specific ceilings not set"}
+                  </span>
+                </div>
+                <div className="flex flex-col">
+                  <span className="text-[11px] font-medium text-[var(--ink-muted)]">Estimated Procurement Cost:</span>
+                  <span className="text-sm font-medium text-[var(--ink-muted)] italic">
+                    Unknown until evaluation
+                  </span>
+                  <span className="text-[10px] text-[var(--ink-muted)]">Defensible landed cost via Multi-Item Studio</span>
+                </div>
               </div>
             </div>
 
@@ -755,22 +1099,24 @@ export function PurchaseRequestCard({
                 <Button
                   type="button"
                   variant="secondary"
-                  onClick={() =>
+                  onClick={() => {
+                    setIsManuallyEdited(true);
+                    setIsDemoTemplateLoaded(false);
                     setMultiItems([
                       ...multiItems,
                       {
                         id: `line_${multiItems.length + 1}`,
                         title: "",
-                        quantity: 1,
-                        quantitySource: "explicit",
-                        quantityConfirmed: true,
+                        quantity: null,
+                        quantitySource: "unresolved",
+                        quantityConfirmed: false,
                         originalInferredQuantity: null,
-                        confirmedAt: new Date().toISOString(),
-                        confirmedBy: actorId,
-                        budgetDollars: "50.00",
+                        confirmedAt: null,
+                        confirmedBy: null,
+                        budgetDollars: "",
                       },
-                    ])
-                  }
+                    ]);
+                  }}
                   className="text-xs py-1 px-2.5"
                   disabled={loading}
                 >
@@ -783,10 +1129,15 @@ export function PurchaseRequestCard({
               )}
 
               <div className="space-y-2">
+                {multiItems.length === 0 && (
+                  <div className="p-4 bg-[var(--surface-raised)] border border-dashed border-[var(--line)] rounded-md text-center text-xs text-[var(--ink-muted)]">
+                    No line items currently added. Click &ldquo;+ Add Line Item&rdquo; above or generate an AI draft to populate items.
+                  </div>
+                )}
                 {multiItems.map((item, idx) => (
                   <div
                     key={item.id}
-                    className="p-3 bg-[var(--surface-raised)] border border-[var(--line)] rounded-md flex flex-col sm:flex-row gap-3 items-start sm:items-center"
+                    className="p-3 bg-[var(--surface-raised)] border border-[var(--line)] rounded-md flex flex-col sm:flex-row gap-3 items-start sm:items-center animate-fade-in-up duration-200 transition-all hover:border-[var(--control-border)] hover:bg-[var(--surface)]"
                   >
                     <span className="font-mono text-xs text-[var(--ink-muted)] w-14">
                       {item.id}
@@ -797,6 +1148,8 @@ export function PurchaseRequestCard({
                         placeholder="Item Title (e.g. Ergonomic Office Chair)"
                         value={item.title}
                         onChange={(e) => {
+                          setIsManuallyEdited(true);
+                          setIsDemoTemplateLoaded(false);
                           const updated = [...multiItems];
                           const it = updated[idx];
                           const isConfInferred = it.quantitySource === "inferred" && it.quantityConfirmed;
@@ -818,60 +1171,54 @@ export function PurchaseRequestCard({
                         </span>
                       )}
                     </div>
-                    <div className="w-32 flex flex-col gap-1">
+                    <div className="w-40 flex flex-col gap-1">
                       <Input
                         type="number"
                         min="1"
                         step="1"
-                        value={item.quantity}
+                        placeholder="Qty"
+                        value={item.quantity !== null && item.quantity !== undefined ? item.quantity : ""}
                         onChange={(e) => {
-                          const parsed = parseInt(e.target.value, 10);
-                          const newQty = Number.isInteger(parsed) && parsed >= 1 ? parsed : 1;
-                          const isRevertedToInferred =
-                            item.originalInferredQuantity !== null && newQty === item.originalInferredQuantity;
+                          setIsManuallyEdited(true);
+                          setIsDemoTemplateLoaded(false);
+                          const val = e.target.value.trim();
+                          const parsed = parseInt(val, 10);
+                          const newQty = val !== "" && Number.isInteger(parsed) && parsed >= 1 ? parsed : null;
                           const updated = [...multiItems];
-                          if (isRevertedToInferred) {
-                            updated[idx] = {
-                              ...item,
-                              quantity: newQty,
-                              quantitySource: "inferred",
-                              quantityConfirmed: false,
-                              confirmationToken: undefined,
-                              confirmedAt: null,
-                              confirmedBy: null,
-                            };
-                          } else {
-                            updated[idx] = {
-                              ...item,
-                              quantity: newQty,
-                              quantitySource: "explicit",
-                              quantityConfirmed: true,
-                              confirmationToken: undefined,
-                              confirmedAt: new Date().toISOString(),
-                              confirmedBy: actorId,
-                            };
-                          }
+                          updated[idx] = {
+                            ...item,
+                            quantity: newQty,
+                            quantitySource: newQty !== null ? "explicit" : "unresolved",
+                            quantityConfirmed: newQty !== null,
+                            confirmationToken: undefined,
+                            confirmedAt: newQty !== null ? new Date().toISOString() : null,
+                            confirmedBy: newQty !== null ? actorId : null,
+                          };
                           setMultiItems(updated);
                         }}
                         disabled={loading}
                         className={`text-xs ${
-                          item.quantitySource === "inferred" && !item.quantityConfirmed
+                          item.quantity === null || (item.quantitySource === "inferred" && !item.quantityConfirmed)
                             ? "border-amber-400 bg-amber-50/40 text-amber-950 font-medium"
                             : ""
                         }`}
                       />
-                      {item.quantitySource === "inferred" && !item.quantityConfirmed ? (
+                      {item.quantity === null ? (
+                        <span className="text-[10px] text-amber-800 bg-amber-100 border border-amber-300 rounded px-1.5 py-0.5 font-medium whitespace-nowrap animate-pulse-subtle">
+                          ⚠️ Clarification: Specify Qty
+                        </span>
+                      ) : item.quantitySource === "inferred" && !item.quantityConfirmed ? (
                         <Button
                           type="button"
                           variant="secondary"
                           onClick={() => handleConfirmLineItemQuantity(idx)}
                           disabled={loading}
-                          className="text-[10px] py-0.5 px-1 bg-amber-100 text-amber-900 border border-amber-300 hover:bg-amber-200 font-medium"
+                          className="text-[10px] py-0.5 px-1 bg-amber-100 text-amber-900 border border-amber-300 hover:bg-amber-200 font-medium animate-pulse-subtle"
                         >
                           ⚠️ Confirm ({item.quantity})
                         </Button>
-                      ) : item.quantitySource === "inferred" && item.quantityConfirmed ? (
-                        <span className="text-[10px] text-emerald-700 font-medium flex items-center gap-1">
+                      ) : item.quantityConfirmed ? (
+                        <span className="text-[10px] text-emerald-700 font-medium flex items-center gap-1 whitespace-nowrap">
                           ✓ Confirmed
                         </span>
                       ) : null}
@@ -886,6 +1233,8 @@ export function PurchaseRequestCard({
                         min="0.01"
                         value={item.budgetDollars}
                         onChange={(e) => {
+                          setIsManuallyEdited(true);
+                          setIsDemoTemplateLoaded(false);
                           const updated = [...multiItems];
                           const it = updated[idx];
                           const isConfInferred = it.quantitySource === "inferred" && it.quantityConfirmed;
@@ -907,6 +1256,8 @@ export function PurchaseRequestCard({
                         type="button"
                         variant="secondary"
                         onClick={() => {
+                          setIsManuallyEdited(true);
+                          setIsDemoTemplateLoaded(false);
                           setMultiItems(multiItems.filter((_, i) => i !== idx));
                         }}
                         disabled={loading}

@@ -13,6 +13,8 @@ import {
   computeSnapshotHash,
   EvidenceFingerprintItem,
   isValidEvidenceFingerprint,
+  isValidSnapshotHash,
+  resolveValidSnapshotHash,
 } from "../state/snapshot";
 import { evaluatePolicy, DEFAULT_POLICY_VERSION } from "../policy/evaluator";
 import { EvidenceItemInput, RequiredAttributeSpec } from "../policy/types";
@@ -141,6 +143,19 @@ export function parseEvidenceCapturedAt(val: unknown): Date {
 }
 
 function candidateRecordToFacts(c: CandidateRecord): CandidateFacts {
+  const effectiveHash = resolveValidSnapshotHash(c.snapshotHash, {
+    availability: c.availability,
+    currency: c.currency,
+    externalId: c.externalId,
+    merchantName: c.merchantName,
+    merchantUrl: c.merchantUrl,
+    quantity: c.quantity,
+    shippingCents: c.shippingCents,
+    source: c.source,
+    totalCents: c.totalCents,
+    unitPriceCents: c.unitPriceCents,
+  });
+
   return {
     id: c.id,
     purchaseId: c.purchaseId,
@@ -150,7 +165,104 @@ function candidateRecordToFacts(c: CandidateRecord): CandidateFacts {
     shippingCents: c.shippingCents,
     totalCents: c.totalCents,
     currency: "USD",
-    snapshotHash: c.snapshotHash,
+    snapshotHash: effectiveHash,
+  };
+}
+
+/**
+ * Reconstructs a strongly typed NormalizedProductCandidate from a persisted CandidateRecord
+ * and its associated EvidenceItemRecords (DEF-AUD-02 & DEF-AUD-03).
+ *
+ * Enforces:
+ * 1. Never infers first-party seller status merely because a candidate was persisted.
+ *    If seller_metadata evidence is absent, seller classification remains undefined (unverified).
+ * 2. Recomputes snapshot hash if persisted hash is missing, whitespace-only (PostgreSQL CHAR padding), or malformed.
+ */
+export function reconstructCandidateFromRecord(
+  c: CandidateRecord,
+  evidenceList: EvidenceItemRecord[] = []
+): import("../discovery/types").NormalizedProductCandidate {
+  const sellerEv = evidenceList.find(
+    (e) => e.candidateId === c.id && e.requirementKey === "seller_metadata"
+  );
+  let isDirectRetailerSeller: boolean | undefined = undefined;
+  let isMarketplace: boolean | undefined = undefined;
+  let sellerName: string | undefined = undefined;
+  let fulfillmentMethod = "standard_ground";
+
+  if (sellerEv) {
+    try {
+      const parsed = JSON.parse(sellerEv.value);
+      if (typeof parsed.isDirectRetailerSeller === "boolean") {
+        isDirectRetailerSeller = parsed.isDirectRetailerSeller;
+      }
+      if (typeof parsed.isMarketplace === "boolean") {
+        isMarketplace = parsed.isMarketplace;
+      }
+      if (typeof parsed.sellerName === "string" && parsed.sellerName.trim().length > 0) {
+        sellerName = parsed.sellerName.trim();
+      }
+      if (typeof parsed.fulfillmentMethod === "string" && parsed.fulfillmentMethod.trim().length > 0) {
+        fulfillmentMethod = parsed.fulfillmentMethod.trim();
+      }
+    } catch {}
+  }
+
+  // Parse attributes from title and observations
+  const rawAttributes: Record<string, unknown> = {};
+  const titleLower = c.title.toLowerCase();
+  if (titleLower.includes("32gb")) rawAttributes.ram = "32GB";
+  else if (titleLower.includes("16gb")) rawAttributes.ram = "16GB";
+  else if (titleLower.includes("8gb")) rawAttributes.ram = "8GB";
+
+  if (titleLower.includes("4k")) rawAttributes.resolution = "4K";
+  const portsList: string[] = [];
+  if (titleLower.includes("usb-c")) portsList.push("usb-c");
+  if (titleLower.includes("dual") || titleLower.includes("hdmi") || titleLower.includes("dp") || titleLower.includes("dock")) {
+    portsList.push("Dual HDMI/DP");
+  }
+  if (portsList.length > 0) {
+    rawAttributes.ports = portsList.join(", ");
+  }
+
+  // Resolve valid snapshot hash (DEF-AUD-03)
+  const effectiveSnapshotHash = resolveValidSnapshotHash(c.snapshotHash, {
+    availability: c.availability,
+    currency: c.currency,
+    externalId: c.externalId,
+    merchantName: c.merchantName,
+    merchantUrl: c.merchantUrl,
+    quantity: c.quantity,
+    shippingCents: c.shippingCents,
+    source: c.source,
+    totalCents: c.totalCents,
+    unitPriceCents: c.unitPriceCents,
+  });
+
+  return {
+    id: c.id,
+    purchaseId: c.purchaseId,
+    externalId: c.externalId,
+    title: c.title,
+    merchantName: c.merchantName,
+    merchantUrl: c.merchantUrl,
+    unitPriceCents: c.unitPriceCents,
+    quantity: c.quantity,
+    shippingCents: c.shippingCents,
+    totalCents: c.totalCents,
+    currency: c.currency as "USD",
+    availability: c.availability,
+    source: c.source,
+    capturedAt: c.capturedAt,
+    snapshotHash: effectiveSnapshotHash,
+    rawSourceData: {},
+    isComplete: true,
+    validationErrors: [],
+    sellerName: sellerName ?? c.merchantName,
+    isMarketplace, // undefined if unverified
+    isDirectRetailerSeller, // undefined if unverified
+    fulfillmentMethod,
+    rawAttributes,
   };
 }
 
@@ -731,6 +843,22 @@ export class PurchaseWorkflowService {
 
       evidenceFingerprint = ingestion.evidenceFingerprint;
 
+      const effectiveCandSnapshotHash = resolveValidSnapshotHash(normalizedCandidate.snapshotHash, {
+        id: normalizedCandidate.id,
+        purchaseId,
+        source: normalizedCandidate.source,
+        externalId: normalizedCandidate.externalId,
+        title: normalizedCandidate.title,
+        merchantName: normalizedCandidate.merchantName,
+        merchantUrl: normalizedCandidate.merchantUrl,
+        unitPriceCents: normalizedCandidate.unitPriceCents,
+        quantity: normalizedCandidate.quantity,
+        shippingCents: normalizedCandidate.shippingCents,
+        totalCents: normalizedCandidate.totalCents,
+        currency: "USD",
+        availability: normalizedCandidate.availability,
+      });
+
       const candidateRecord: CandidateRecord = {
         id: normalizedCandidate.id,
         purchaseId,
@@ -746,7 +874,7 @@ export class PurchaseWorkflowService {
         currency: "USD",
         availability: normalizedCandidate.availability,
         capturedAt: normalizedCandidate.capturedAt,
-        snapshotHash: normalizedCandidate.snapshotHash,
+        snapshotHash: effectiveCandSnapshotHash,
       };
 
       const evidenceRecords: EvidenceItemRecord[] = ingestion.evidenceRecords.map((e) => ({
@@ -759,6 +887,28 @@ export class PurchaseWorkflowService {
         capturedAt: parseEvidenceCapturedAt(e.capturedAt),
         status: e.status,
       }));
+
+      if (
+        normalizedCandidate.isDirectRetailerSeller !== undefined ||
+        normalizedCandidate.isMarketplace !== undefined ||
+        normalizedCandidate.sellerName !== undefined
+      ) {
+        evidenceRecords.push({
+          id: `ev_${normalizedCandidate.id}_seller`,
+          candidateId: normalizedCandidate.id,
+          requirementKey: "seller_metadata",
+          value: JSON.stringify({
+            isDirectRetailerSeller: normalizedCandidate.isDirectRetailerSeller,
+            isMarketplace: normalizedCandidate.isMarketplace,
+            sellerName: normalizedCandidate.sellerName,
+            fulfillmentMethod: normalizedCandidate.fulfillmentMethod,
+          }),
+          sourceUrl: normalizedCandidate.merchantUrl || "https://seller.plinthly.local",
+          sourceType: "channel3_offer_seller",
+          capturedAt: parseEvidenceCapturedAt(normalizedCandidate.capturedAt),
+          status: "supports",
+        });
+      }
 
       await this.repo.saveCandidateWithEvidence(candidateRecord, evidenceRecords);
 
@@ -2373,7 +2523,60 @@ export class PurchaseWorkflowService {
 
     assertPurchaseAccess(actor, aggregate.purchase.ownerUserId, "evaluate");
 
-    const validatedLineItems = validateProcurementLineItems(req.lineItems, aggregate.purchase.currency);
+    const actorId = actor.kind === "user" ? actor.userId : actor.component;
+    const reqs = aggregate.purchase.requirements;
+
+    // 1. Server-side boundary sanitization: strip client-supplied internal provenance regardless of purchase type
+    const hadClientSuppliedLegacyDirect = req.lineItems.some(
+      (item) => item.quantitySource === "legacy_direct"
+    );
+
+    const sanitizedLineItems = req.lineItems.map((item) => {
+      if (item.quantitySource === "legacy_direct") {
+        const { quantitySource: _stripped, ...rest } = item;
+        return rest;
+      }
+      return item;
+    });
+
+    // 2. Only after sanitization, derive legacy provenance strictly from trusted persisted purchase data
+    const isLegacyDirectPurchase =
+      Array.isArray(reqs) && aggregate.purchase.originatingDraftId === null;
+
+    if (hadClientSuppliedLegacyDirect && !isLegacyDirectPurchase) {
+      throw new ValidationError("Invalid line items in multi-item plan request", [
+        {
+          lineItemId: req.lineItems.find((li) => li.quantitySource === "legacy_direct")?.id ?? "unknown",
+          code: "unauthorized_legacy_provenance",
+          message: 'Line item cannot specify internal provenance "legacy_direct".',
+        },
+      ]);
+    }
+
+    // 3. Attach legacy_direct exclusively inside the server-side service after authorization
+    const serverPreparedLineItems = sanitizedLineItems.map((item) => {
+      if (isLegacyDirectPurchase) {
+        return {
+          ...item,
+          quantitySource: "legacy_direct" as const,
+          quantityConfirmed: true,
+          confirmedAt: item.confirmedAt ?? now.toISOString(),
+          confirmedBy: item.confirmedBy ?? actorId,
+        };
+      }
+      return item;
+    });
+
+    const validatedLineItems = validateProcurementLineItems(
+      serverPreparedLineItems,
+      aggregate.purchase.currency,
+      {
+        isLegacyCompatibilityPath: isLegacyDirectPurchase,
+        workflowContext: isLegacyDirectPurchase ? "legacy_direct" : undefined,
+        confirmedAt: now.toISOString(),
+        confirmedBy: actorId,
+      }
+    );
     if (!validatedLineItems.ok) {
       throw new ValidationError("Invalid line items in multi-item plan request", validatedLineItems.errors);
     }
@@ -2403,23 +2606,21 @@ export class PurchaseWorkflowService {
             : typeof rawCand.capturedAt === "string"
             ? parseEvidenceCapturedAt(rawCand.capturedAt)
             : new Date(0);
-        const effectiveSnapshotHash =
-          rawCand.snapshotHash ||
-          computeSnapshotHash({
-            id: rawCand.id,
-            purchaseId,
-            source: rawCand.source,
-            externalId: rawCand.externalId,
-            title: rawCand.title,
-            merchantName: rawCand.merchantName,
-            merchantUrl: rawCand.merchantUrl,
-            unitPriceCents: rawCand.unitPriceCents,
-            quantity: rawCand.quantity,
-            shippingCents: rawCand.shippingCents,
-            totalCents: rawCand.totalCents,
-            currency: "USD",
-            availability: rawCand.availability,
-          });
+        const effectiveSnapshotHash = resolveValidSnapshotHash(rawCand.snapshotHash, {
+          id: rawCand.id,
+          purchaseId,
+          source: rawCand.source,
+          externalId: rawCand.externalId,
+          title: rawCand.title,
+          merchantName: rawCand.merchantName,
+          merchantUrl: rawCand.merchantUrl,
+          unitPriceCents: rawCand.unitPriceCents,
+          quantity: rawCand.quantity,
+          shippingCents: rawCand.shippingCents,
+          totalCents: rawCand.totalCents,
+          currency: "USD",
+          availability: rawCand.availability,
+        });
         const cand = {
           ...rawCand,
           snapshotHash: effectiveSnapshotHash,
@@ -2442,34 +2643,35 @@ export class PurchaseWorkflowService {
           capturedAt: safeCapturedAt,
           snapshotHash: effectiveSnapshotHash,
         };
-        await this.repo.saveCandidateWithEvidence(candRecord, []);
+        const evidenceRecords: EvidenceItemRecord[] = [];
+        if (
+          cand.isDirectRetailerSeller !== undefined ||
+          cand.isMarketplace !== undefined ||
+          cand.sellerName !== undefined
+        ) {
+          evidenceRecords.push({
+            id: `ev_${cand.id}_seller`,
+            candidateId: cand.id,
+            requirementKey: "seller_metadata",
+            value: JSON.stringify({
+              isDirectRetailerSeller: cand.isDirectRetailerSeller,
+              isMarketplace: cand.isMarketplace,
+              sellerName: cand.sellerName,
+              fulfillmentMethod: cand.fulfillmentMethod,
+            }),
+            sourceUrl: cand.merchantUrl || "https://seller.plinthly.local",
+            sourceType: "channel3_offer_seller",
+            capturedAt: safeCapturedAt,
+            status: "supports",
+          });
+        }
+        await this.repo.saveCandidateWithEvidence(candRecord, evidenceRecords);
       }
       candidatePool = normalizedPool;
     } else if (aggregate.candidates && aggregate.candidates.length > 0) {
-      candidatePool = aggregate.candidates.map((c) => ({
-        id: c.id,
-        purchaseId: c.purchaseId,
-        externalId: c.externalId,
-        title: c.title,
-        merchantName: c.merchantName,
-        merchantUrl: c.merchantUrl,
-        unitPriceCents: c.unitPriceCents,
-        quantity: c.quantity,
-        shippingCents: c.shippingCents,
-        totalCents: c.totalCents,
-        currency: c.currency as "USD",
-        availability: c.availability,
-        source: c.source,
-        capturedAt: c.capturedAt,
-        snapshotHash: c.snapshotHash,
-        rawSourceData: {},
-        isComplete: true,
-        validationErrors: [],
-        sellerName: c.merchantName,
-        isMarketplace: false,
-        isDirectRetailerSeller: true,
-        fulfillmentMethod: "standard_ground",
-      }));
+      candidatePool = aggregate.candidates.map((c) =>
+        reconstructCandidateFromRecord(c, aggregate.evidence)
+      );
     } else {
       // Execute live/mocked per-line-item discovery through discoveryAdapter
       for (const item of lineItems) {
@@ -2488,14 +2690,33 @@ export class PurchaseWorkflowService {
             now,
           });
           if (discResult.status === "success" && discResult.candidates.length > 0) {
-            for (const cand of discResult.candidates) {
-              candidatePool.push(cand);
+            for (const rawCand of discResult.candidates) {
               const safeCapturedAt =
-                cand.capturedAt instanceof Date && !isNaN(cand.capturedAt.getTime())
-                  ? cand.capturedAt
-                  : typeof cand.capturedAt === "string"
-                  ? parseEvidenceCapturedAt(cand.capturedAt)
+                rawCand.capturedAt instanceof Date && !isNaN(rawCand.capturedAt.getTime())
+                  ? rawCand.capturedAt
+                  : typeof rawCand.capturedAt === "string"
+                  ? parseEvidenceCapturedAt(rawCand.capturedAt)
                   : new Date(0);
+              const effectiveSnapshotHash = resolveValidSnapshotHash(rawCand.snapshotHash, {
+                id: rawCand.id,
+                purchaseId,
+                source: rawCand.source,
+                externalId: rawCand.externalId,
+                title: rawCand.title,
+                merchantName: rawCand.merchantName,
+                merchantUrl: rawCand.merchantUrl,
+                unitPriceCents: rawCand.unitPriceCents,
+                quantity: rawCand.quantity,
+                shippingCents: rawCand.shippingCents,
+                totalCents: rawCand.totalCents,
+                currency: "USD",
+                availability: rawCand.availability,
+              });
+              const cand = {
+                ...rawCand,
+                snapshotHash: effectiveSnapshotHash,
+              };
+              candidatePool.push(cand);
               const candRecord: CandidateRecord = {
                 id: cand.id,
                 purchaseId,
@@ -2511,9 +2732,31 @@ export class PurchaseWorkflowService {
                 currency: "USD",
                 availability: cand.availability,
                 capturedAt: safeCapturedAt,
-                snapshotHash: cand.snapshotHash,
+                snapshotHash: effectiveSnapshotHash,
               };
-              await this.repo.saveCandidateWithEvidence(candRecord, []);
+              const evidenceRecords: EvidenceItemRecord[] = [];
+              if (
+                cand.isDirectRetailerSeller !== undefined ||
+                cand.isMarketplace !== undefined ||
+                cand.sellerName !== undefined
+              ) {
+                evidenceRecords.push({
+                  id: `ev_${cand.id}_seller`,
+                  candidateId: cand.id,
+                  requirementKey: "seller_metadata",
+                  value: JSON.stringify({
+                    isDirectRetailerSeller: cand.isDirectRetailerSeller,
+                    isMarketplace: cand.isMarketplace,
+                    sellerName: cand.sellerName,
+                    fulfillmentMethod: cand.fulfillmentMethod,
+                  }),
+                  sourceUrl: cand.merchantUrl || "https://seller.plinthly.local",
+                  sourceType: "channel3_offer_seller",
+                  capturedAt: safeCapturedAt,
+                  status: "supports",
+                });
+              }
+              await this.repo.saveCandidateWithEvidence(candRecord, evidenceRecords);
             }
           }
         } catch {
@@ -2611,30 +2854,9 @@ export class PurchaseWorkflowService {
     if (req.candidates && req.candidates.length > 0) {
       candidatePool = req.candidates as unknown as import("../discovery/types").NormalizedProductCandidate[];
     } else if (aggregate.candidates && aggregate.candidates.length > 0) {
-      candidatePool = aggregate.candidates.map((c) => ({
-        id: c.id,
-        purchaseId: c.purchaseId,
-        externalId: c.externalId,
-        title: c.title,
-        merchantName: c.merchantName,
-        merchantUrl: c.merchantUrl,
-        unitPriceCents: c.unitPriceCents,
-        quantity: c.quantity,
-        shippingCents: c.shippingCents,
-        totalCents: c.totalCents,
-        currency: c.currency as "USD",
-        availability: c.availability,
-        source: c.source,
-        capturedAt: c.capturedAt,
-        snapshotHash: c.snapshotHash,
-        rawSourceData: {},
-        isComplete: true,
-        validationErrors: [],
-        sellerName: c.merchantName,
-        isMarketplace: false,
-        isDirectRetailerSeller: true,
-        fulfillmentMethod: "standard_ground",
-      }));
+      candidatePool = aggregate.candidates.map((c) =>
+        reconstructCandidateFromRecord(c, aggregate.evidence)
+      );
     }
 
     const strategies = generateProcurementStrategies({
@@ -2704,6 +2926,21 @@ export class PurchaseWorkflowService {
             : typeof matching.capturedAt === "string"
             ? parseEvidenceCapturedAt(matching.capturedAt)
             : new Date(0);
+        const effectiveAllocSnapshotHash = resolveValidSnapshotHash(alloc.snapshotHash, {
+          id: matching.id,
+          purchaseId,
+          source: matching.source,
+          externalId: matching.externalId,
+          title: matching.title,
+          merchantName: matching.merchantName,
+          merchantUrl: matching.merchantUrl,
+          unitPriceCents: matching.unitPriceCents,
+          quantity: matching.quantity,
+          shippingCents: matching.shippingCents,
+          totalCents: matching.totalCents,
+          currency: "USD",
+          availability: matching.availability,
+        });
         const candRecord: CandidateRecord = {
           id: matching.id,
           purchaseId,
@@ -2719,9 +2956,31 @@ export class PurchaseWorkflowService {
           currency: "USD",
           availability: matching.availability,
           capturedAt: safeCapturedAt,
-          snapshotHash: alloc.snapshotHash,
+          snapshotHash: effectiveAllocSnapshotHash,
         };
-        await this.repo.saveCandidateWithEvidence(candRecord, []);
+        const evidenceRecords: EvidenceItemRecord[] = [];
+        if (
+          matching.isDirectRetailerSeller !== undefined ||
+          matching.isMarketplace !== undefined ||
+          matching.sellerName !== undefined
+        ) {
+          evidenceRecords.push({
+            id: `ev_${matching.id}_seller`,
+            candidateId: matching.id,
+            requirementKey: "seller_metadata",
+            value: JSON.stringify({
+              isDirectRetailerSeller: matching.isDirectRetailerSeller,
+              isMarketplace: matching.isMarketplace,
+              sellerName: matching.sellerName,
+              fulfillmentMethod: matching.fulfillmentMethod,
+            }),
+            sourceUrl: matching.merchantUrl || "https://seller.plinthly.local",
+            sourceType: "channel3_offer_seller",
+            capturedAt: safeCapturedAt,
+            status: "supports",
+          });
+        }
+        await this.repo.saveCandidateWithEvidence(candRecord, evidenceRecords);
       }
     }
 
