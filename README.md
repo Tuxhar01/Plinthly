@@ -1,170 +1,222 @@
-# Plinthly
+# 🛒 Plinthly
+### Every purchase. Proven.
 
-> **Every purchase. Proven.**  
-> Commercial Assurance and Deterministic Policy Verification for Autonomous AI Procurement.
+**Evidence-based procurement assurance for AI-powered purchasing.**
 
-Built for the **PayPal AI Hackathon** (Submission Deadline: November 12, 2026, 12:00 PM Pacific Time).
-
----
-
-## 1. Overview & The Commercial Assurance Problem
-
-When autonomous AI agents or automated procurement workflows select products on behalf of enterprise buyers, they encounter a fatal trust gap:
-- **The "Base-Price" Illusion:** AI shopping tools evaluate candidates based purely on base sticker price, ignoring shipping policies, regional freight surcharges, and statutory sales taxes that add 5% to 35% to order totals.
-- **The Hallucination of Free Shipping:** Naive LLMs frequently treat missing shipping data as `$0.00`, or hallucinate that split multi-retailer orders will all qualify for free delivery.
-- **The Uncontrolled Checkout Boundary:** Prototypes either ask for unrestricted corporate credit cards or blindly fire checkout calls, risking irreversible over-billing and accidental settlement.
-
-**Plinthly** is an **evidence-gated AI procurement agent**. Its defining capability is that **every purchasing decision must be supported by verifiable evidence, deterministic policy verification, and buyer approval bound to an exact offer snapshot with zero landed-cost variance.**
+Built for the **PayPal AI Hackathon 2026**.
 
 ---
 
-## 2. System Architecture: Probabilistic Intent vs. Deterministic Policy
+## 💡 1. The Problem
 
-Plinthly enforces an architectural separation between natural-language understanding and procurement execution:
+Buying products through automated procurement systems sounds simple: describe what you need, compare options, and make a purchase.
 
+In practice, several challenges make this process unreliable:
+
+- **Hidden costs:** Product prices rarely tell the whole story. Shipping fees and taxes can significantly increase the final cost.
+- **Unreliable information:** Product specifications, stock availability, and seller details may be incomplete or inaccurate.
+- **Uncontrolled purchases:** AI agents should not spend money without clear approval and financial safeguards.
+
+**Plinthly** was built to address these challenges.
+
+It is an AI-assisted procurement assurance platform that helps buyers evaluate products, compare purchasing strategies, verify costs, and approve purchases before payment.
+
+## 🏗️ 2. How Plinthly Works
+
+Plinthly separates AI-powered understanding from financial decision-making.
+
+Google Gemini interprets natural-language purchase requests and converts them into structured requirements. A deterministic assurance engine then evaluates products, costs, and purchasing policies.
+
+The AI assists with understanding the request; it does not independently approve purchases or authorize payments.
+
+### System Architecture
+
+```text
+Natural-Language Purchase Request
+              |
+              v
+        Google Gemini
+      Intent Decomposition
+              |
+              v
+     Procurement Engine
+   Product & Seller Evaluation
+   Multi-Merchant Comparison
+   Shipping & Tax Validation
+              |
+              v
+        Buyer Approval
+    SHA-256 Snapshot Binding
+              |
+              v
+         PayPal Sandbox
+    Authorization & Capture
+              |
+              v
+      Audit & Reconciliation
 ```
-┌────────────────────────────────────────────────────────┐
-│ PROBABILISTIC INTERFACE (Google Gemini)                │
-│ • Decomposes natural language into structured items    │
-│ • Extracts budget, quantity, and technical specs       │
-│ • Flags unresolved ambiguities and confidence limits   │
-│ • NEVER makes purchasing decisions or approves funds   │
-└───────────────────────────┬────────────────────────────┘
-                            │
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│ DETERMINISTIC ASSURANCE ENGINE (PostgreSQL & Next.js)  │
-│ • Non-floating-point monetary evaluation (BigInt cents)│
-│ • Multi-merchant shipping threshold evaluation         │
-│ • Pareto-optimal split-order cart optimization         │
-│ • Cryptographic SHA-256 snapshot binding               │
-│ • Model A Landed Cost: Items - Disc + Ship + Tax = Total│
-│ • Fail-Closed Database Triggers & Sequential Capture   │
-└───────────────────────────┬────────────────────────────┘
-                            │
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│ PAYPAL SANDBOX BOUNDARY & RECONCILIATION               │
-│ • Sequential multi-cart capture across merchant carts  │
-│ • PayPal-Request-Id idempotency & fast-ack webhook queue│
-│ • DEF-P4-01 pre-persisted refund intent derivation     │
-└────────────────────────────────────────────────────────┘
-```
 
----
+## ⚙️ 3. Key Features
 
-## 3. Key Capabilities & Differentiators
+### 🤖 AI Purchase Intent Decomposition
+Uses Google Gemini to extract product requirements, quantities, budgets, and other details from natural-language requests.
 
-1. **Evidence-Backed Model A Landed Cost ($\Delta_{\text{landed}} \equiv 0$):**
-   $$\text{Merchandise Subtotal} - \text{Discount} + \text{Shipping Total} + \text{Statutory Tax} \equiv \text{Total Authorized Cents}$$
-   Reconciles authoritative evidence and validated quotes down to the exact minor unit cent before approval. Unknown shipping or statutory tax remains explicitly unknown and fails closed (`UNQUOTED_SHIPPING_BLOCKED`); estimated amounts are never silently converted into verified evidence.
-2. **Relational Multi-Cart Allocation:**
-   Partitions multi-item baskets across multiple merchants (Best Buy, B&H Photo, Target, Walmart) to satisfy line-item completeness, evaluate free shipping thresholds, and minimize total landed cost.
-3. **Non-Bypassable Human-in-the-Loop Approval:**
-   Computes canonical SHA-256 snapshot digests. If any item, price, or delivery destination changes after approval, the snapshot hash mismatches and checkout is blocked.
-4. **Sequential Multi-Cart Checkout with PayPal Sandbox:**
-   Captures approved carts monotonically one by one with multi-merchant failure isolation. Ambiguous network timeouts are safely preserved without duplicate billing.
-5. **Durable Refund Provenance (DEF-P4-01):**
-   Commits `CartRefundRecord` in PostgreSQL *before* gateway dispatch, deriving the PayPal `PayPal-Request-Id` directly from the persisted record ID.
+### 🛍️ Multi-Merchant Product Discovery
+Evaluates product options across supported merchant catalog sources and compares their suitability.
 
----
+### 📊 Procurement Strategy Comparison
+Supports four purchasing strategies:
 
-## 4. Quick Start & Judge Evaluation Paths
+- Consolidated Purchasing
+- Lowest Landed Cost
+- Balanced Optimal Allocation
+- Verified Direct Retailer
 
-Plinthly supports two unmistakable, fully separated evaluation paths:
+### 💰 Landed-Cost Verification
+Evaluates merchandise prices, discounts, shipping, and applicable taxes before approval. Unknown costs remain unknown rather than being treated as zero.
 
-### Mode A: Local Demo Mode (Simulated Testbed — Zero Private Credentials)
-Designed for immediate, frictionless hackathon judging without requiring private API keys or merchant sandbox accounts:
-- **No Private Credentials:** Runs completely offline or with local Docker PostgreSQL.
-- **Simulated Testbed:** Uses synthetic procurement catalog fixtures and local simulated payment execution (`MockPaymentGatewayClient`).
-- **Zero Ambiguity:** Never claims that PayPal processed a payment in this mode.
-- **Explicit Badging:** Checkout is clearly labeled `Local Demo Mode (Simulated Payment — No External PayPal Call)`, and simulated capture IDs are prefixed `Simulated Capture: CAP-... (Local Demo)`.
-- **Honest Attestation:** Receipts display `Ledger: Cryptographic Purchase Attestation (Model A Landed Cost)` and denote simulated settlement.
+### 🔐 Human Approval & Snapshot Integrity
+Uses SHA-256 snapshot digests to bind buyer approval to the evaluated purchase details. Changes to an approved offer can trigger further verification.
+
+### 💳 PayPal Sandbox Integration
+Integrates PayPal Orders v2 for sandbox order creation, buyer approval, capture, and refund workflows, with idempotency and payment reconciliation safeguards.
+
+### 🧾 Audit Trail
+Maintains persistent records of procurement decisions, approvals, and payment-related events.
+
+## 🧰 4. Technology Stack
+
+| Component | Technology |
+|---|---|
+| Frontend | Next.js, React, TypeScript |
+| Backend | Next.js API Routes |
+| Database | PostgreSQL |
+| ORM | Prisma |
+| AI | Google Gemini |
+| Product Discovery | Channel3 |
+| Payments | PayPal Orders v2 |
+| Cryptography | SHA-256 |
+| Testing | Vitest |
+| Deployment | Vercel |
+
+## 🚀 5. Running the Project Locally
+
+### Prerequisites
+- Node.js
+- npm
+- PostgreSQL
+- Git
+
+### Installation
 
 ```bash
-# 1. Install dependencies
+git clone <your-repository-url>
+cd plinthly
 npm install
+```
 
-# 2. Start Next.js development server on port 3000
+### Environment Configuration
+
+Create a `.env.local` file in the project root.
+
+Configure the database connection and API credentials required for your selected evaluation mode. Never commit API keys, passwords, or other secrets to the repository.
+
+### Start the Development Server
+
+```bash
 npm run dev
 ```
-Open **[http://localhost:3000](http://localhost:3000)** in your browser and click **"Load Demo Fixture"**, then click **"Evaluate Multi-Item Plan"** to inspect deterministic planning and simulated settlement.
 
-### Mode B: PayPal Sandbox Mode (Live Developer Platform REST v2)
-Connects directly to the live PayPal Developer Platform Sandbox (`api-m.sandbox.paypal.com`):
-- **Requires Valid Sandbox Credentials:** Requires `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET` in `.env.local` with `PAYPAL_MODE=sandbox`.
-- **Real REST API:** Uses live PayPal REST v2 endpoints for OAuth2 tokens, order creation (`intent: "AUTHORIZE"`), and sequential captures.
-- **Real Buyer Approval:** Launches the genuine PayPal Sandbox buyer checkout portal (`https://www.sandbox.paypal.com/checkoutnow?token={orderId}`) where a test buyer logs in and approves funds.
-- **Server-Side Verified Payment:** Reports payment completion only after PayPal returns genuine status `COMPLETED` and server-side PostgreSQL records verify payment evidence.
+Open **http://localhost:3000** in your browser.
 
-1. **Configure Environment in `.env.local`:**
-   ```env
-   PAYPAL_CLIENT_ID=your_sandbox_client_id
-   PAYPAL_CLIENT_SECRET=your_sandbox_client_secret
-   PAYPAL_API_BASE_URL=https://api-m.sandbox.paypal.com
-   PAYPAL_MODE=sandbox
-   ```
-2. **Execute Live PayPal Sandbox Integration Suite:**
-   PAYPAL_CLIENT_SECRET=your_sandbox_client_secret
-   PAYPAL_API_BASE_URL=https://api-m.sandbox.paypal.com
-   PAYPAL_MODE=sandbox
-   ```
-2. **Execute Live PayPal Sandbox Integration Suite:**
-   ```bash
-   npx vitest run tests/integration/paypal-sandbox-live.test.ts
-   ```
-   *Verifies live OAuth2 token exchange (`POST /v1/oauth2/token`), order creation with `intent: "AUTHORIZE"` (`POST /v2/checkout/orders`), authoritative order retrieval (`GET /v2/checkout/orders/{id}`), and fail-closed intent rejection directly against PayPal servers.*
-3. **Interactive Buyer Approval Walkthrough:**
-   * An order created in PayPal Sandbox returns a genuine HATEOAS approval link (`https://www.sandbox.paypal.com/checkoutnow?token={orderId}`).
-   * The judge visits this link in any browser, logs in with a personal PayPal Sandbox test buyer account (`sb-buyer@personal.example.com`), and clicks **"Continue"**.
-   * Once approved, the multi-retailer capture route (`POST /api/cart/capture`) executes sequential capture via `PayPalSandboxGatewayAdapter`.
-4. **Empirical Evidence Report:**
-   * Consult **[`PAYPAL_SANDBOX_E2E_EVIDENCE.md`](PAYPAL_SANDBOX_E2E_EVIDENCE.md)** for live HTTP traces, response payloads, and sanitized order IDs.
+## 🧪 6. Evaluation Modes
 
-For the full 2-minute-40-second interactive walkthrough script, consult **[`JUDGE_DEMO_RUNBOOK.md`](JUDGE_DEMO_RUNBOOK.md)**.
+Plinthly supports two distinct evaluation paths.
 
----
+### 🟢 Mode A: Local Demo Mode
 
-## 5. Verification & Test Suite
+Designed to let judges explore the procurement workflow without requiring external payment credentials.
 
-The test suite validates concurrency, cryptographic verification, canonical routines, and financial invariants:
+- Uses synthetic product and merchant fixtures.
+- Supports local procurement evaluation.
+- Uses simulated payment execution.
+- Clearly identifies simulated transactions.
+- Does not claim that PayPal processed a payment.
+
+### 🔵 Mode B: PayPal Sandbox Mode
+
+Connects to the PayPal Developer Sandbox.
+
+- Uses server-side PayPal credentials.
+- Creates PayPal Orders v2 orders.
+- Supports buyer approval through the Sandbox checkout experience.
+- Supports payment capture and refund workflows.
+- Reconciles payment results against server-side records.
+
+*Sandbox transactions are test transactions, not real-money purchases.*
+
+## ✅ 7. Testing & Verification
+
+The project includes tests for procurement logic, payment workflows, database operations, and cryptographic verification.
+
+Run the following commands:
 
 ```bash
-# 1. Run full local regression test suite (114 test files, 1,568 tests)
+# Run the test suite
 npm test
 
-# 2. Strict TypeScript typecheck (0 errors)
+# TypeScript validation
 npx tsc --noEmit
 
-# 3. Prisma schema validation (0 errors)
+# Validate Prisma schema
 npx prisma validate
 
-# 4. Next.js production build (19/19 routes compiled & prerendered)
+# Build the application
 npm run build
 
-# 5. Baseline database integrity verification
+# Verify database baseline
 node scripts/verify-baseline.js
 ```
-*Result:* **114/114 test files passed, 1,568 tests passed, 0 failures.**
 
----
+**Recorded regression baseline:** 114 test files, 1,568 passing tests.
 
-## 6. Official Submission Documents
+## 🧠 8. Challenges & Learnings
+
+Building Plinthly involved more than connecting an AI model to a shopping interface.
+
+Some of the most challenging parts were handling incomplete shipping and tax information, preventing unsuitable product recommendations, maintaining consistent purchase snapshots, and designing reliable payment workflows.
+
+One important lesson was that an AI-generated recommendation should never automatically become a financial decision. Procurement requires evidence, validation, and explicit buyer approval.
+
+## 🔭 9. What's Next?
+
+There is still plenty of room to improve Plinthly.
+
+Future development includes:
+
+- Expanding merchant and product coverage.
+- Improving access to reliable shipping and tax quotations.
+- Strengthening production authentication.
+- Improving procurement analytics.
+- Refining the buyer approval and checkout experience.
+
+The long-term goal is to make Plinthly a dependable assurance layer for AI-assisted purchasing, where every recommendation, approval, and payment can be traced to supporting evidence.
+
+## 📚 10. Project Documentation
+
+Additional technical documentation is available in the repository:
 
 | Document | Description |
-| :--- | :--- |
-| **[`PAYPAL_SANDBOX_E2E_EVIDENCE.md`](PAYPAL_SANDBOX_E2E_EVIDENCE.md)** | Empirical proof of live PayPal Sandbox API interactions, fail-closed intent gates, and sanitized traces. |
-| **[`JUDGE_DEMO_RUNBOOK.md`](JUDGE_DEMO_RUNBOOK.md)** | Sub-3-minute timestamped video script (2m 40s) and step-by-step judge runbook. |
-| **[`HACKATHON_OFFICIAL_COMPLIANCE_MATRIX.md`](HACKATHON_OFFICIAL_COMPLIANCE_MATRIX.md)** | Evidence matrix verifying every official PayPal AI Hackathon requirement. |
-| **[`HACKATHON_SUBMISSION_CHECKLIST.md`](HACKATHON_SUBMISSION_CHECKLIST.md)** | Submission checklist and action items for final Devpost form. |
-| **[`PITCH_NARRATIVE.md`](PITCH_NARRATIVE.md)** | Problem statement, commercial assurance manifesto, and competitive differentiation. |
-| **[`TECHNICAL_ARCHITECTURE_OVERVIEW.md`](TECHNICAL_ARCHITECTURE_OVERVIEW.md)** | Engineering blueprint, ER diagrams, canonical routines `R2-01` to `R2-08`. |
-| **[`FEATURE_AND_CAPABILITY_DISCLOSURE.md`](FEATURE_AND_CAPABILITY_DISCLOSURE.md)** | Transparent operational boundaries: live cloud APIs vs local DB vs sandbox adapters. |
-| **[`HACKATHON_FINALIZATION_REPORT.md`](HACKATHON_FINALIZATION_REPORT.md)** | Final authorization and readiness assessment report. |
+|---|---|
+| `PAYPAL_SANDBOX_E2E_EVIDENCE.md` | PayPal Sandbox integration evidence |
+| `JUDGE_DEMO_RUNBOOK.md` | Demonstration instructions |
+| `HACKATHON_OFFICIAL_COMPLIANCE_MATRIX.md` | Hackathon requirements and compliance |
+| `TECHNICAL_ARCHITECTURE_OVERVIEW.md` | Technical architecture |
+| `FEATURE_AND_CAPABILITY_DISCLOSURE.md` | Feature boundaries and operational details |
+| `PITCH_NARRATIVE.md` | Product positioning and problem statement |
 
----
+## 📄 11. License
 
-## 7. License
+This project is licensed under the **MIT License**.
 
-This project is licensed under the terms of the [MIT License](LICENSE).  
-Copyright (c) 2026 Tushar Kumar. All rights reserved.
+Copyright © 2026 Tushar Kumar.
